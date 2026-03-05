@@ -8,7 +8,7 @@ Produces:
   - audio/             : .wav files for original and reconstructed chunks
 
 Usage:
-    python evaluate.py -r saved/models/SpecVAE/<timestamp>/model_best.pth [-n 6] [-o eval_output]
+    python evaluate.py -r saved/models/SpecVAE/<timestamp>/model_best.pth [-n 6] [-o eval/<run_name>]
 """
 
 import argparse
@@ -99,15 +99,54 @@ def select_sample_indices(filenames, chunk_indices, n_samples):
     return selected
 
 
-def mel_chunk_to_audio(spec_db, sr=22050, n_fft=2048, hop_length=735, n_mels=64):
-    """
-    Convert a (64, T) dB mel spectrogram chunk to a waveform.
-    Uses librosa Griffin-Lim via mel_to_audio.
-    """
-    S_power = librosa.db_to_power(spec_db.numpy().astype(np.float32))
-    y = librosa.feature.inverse.mel_to_audio(
+def mel_to_audio(spec_db, sr=22050, n_fft=2048, hop_length=735):
+    """Convert a (64, T) dB mel spectrogram to a waveform via Griffin-Lim."""
+    S_power = librosa.db_to_power(spec_db.astype(np.float32))
+    return librosa.feature.inverse.mel_to_audio(
         S_power, sr=sr, n_fft=n_fft, hop_length=hop_length, n_iter=64)
-    return y
+
+
+def reconstruct_full_file(model, npy_path, device,
+                          chunk_size=15, sr=22050, n_fft=2048, hop_length=735):
+    """
+    Reconstruct a full audio file by:
+      1. Loading the pre-computed mel spectrogram (.npy, shape (64, N_frames))
+      2. Normalising to (-1, 1)
+      3. Splitting into non-overlapping chunks of chunk_size frames
+      4. Passing each chunk through the VAE
+      5. Concatenating reconstructed chunks along the time axis
+      6. Inverting both original and reconstruction to audio via Griffin-Lim
+
+    Returns (y_orig, y_recon, spec_norm, recon_full) — all numpy arrays.
+    """
+    spec = np.load(npy_path)                       # (64, N_frames), dB
+    spec_norm = spec / 40.0 + 1.0                  # normalise to (-1, 1)
+
+    # Slice into non-overlapping chunks (same logic as SpecChunking)
+    n_frames = spec_norm.shape[1]
+    n_chunks = n_frames // chunk_size
+    chunks = [spec_norm[:, i*chunk_size:(i+1)*chunk_size]
+              for i in range(n_chunks)]             # list of (64, chunk_size)
+
+    # Run each chunk through the VAE
+    recon_chunks = []
+    model.eval()
+    with torch.no_grad():
+        for chunk in chunks:
+            x = torch.tensor(chunk, dtype=torch.float32)
+            x = x.unsqueeze(0).unsqueeze(0).to(device)  # (1, 1, 64, chunk_size)
+            x_recon, _, _, _ = model(x)
+            recon_chunks.append(x_recon.squeeze(0).cpu().numpy())  # (64, chunk_size)
+
+    # Concatenate along time axis → (64, n_chunks * chunk_size)
+    recon_full = np.concatenate(recon_chunks, axis=1)
+    orig_full  = spec_norm[:, :n_chunks * chunk_size]
+
+    # Invert NormaliseSpecDb → dB, then Griffin-Lim
+    y_orig  = mel_to_audio((orig_full  - 1.0) * 40.0, sr=sr, n_fft=n_fft, hop_length=hop_length)
+    y_recon = mel_to_audio((recon_full - 1.0) * 40.0, sr=sr, n_fft=n_fft, hop_length=hop_length)
+
+    return y_orig, y_recon, orig_full, recon_full
 
 
 # ---------------------------------------------------------------------------
@@ -201,33 +240,46 @@ def plot_kl_per_dim(mu, logvar, out_path):
     print(f'Saved  {out_path}')
 
 
-def save_audio_samples(inputs, recons, labels, filenames, chunk_indices,
-                       sample_indices, out_dir, sr=22050, n_fft=2048, hop_length=735):
-    """Save .wav pairs for each selected chunk (one per unique file)."""
+def save_audio_samples(model, data_loader, labels, filenames, chunk_indices,
+                       sample_indices, out_dir, device,
+                       sr=22050, n_fft=2048, hop_length=735):
+    """
+    For each selected sample, reconstruct the full source file (not just one chunk)
+    by concatenating VAE reconstructions of all non-overlapping chunks.
+    Saves original and reconstructed .wav files.
+    """
     os.makedirs(out_dir, exist_ok=True)
-    for row, i in enumerate(sample_indices):
-        lbl   = labels[i]    if i < len(labels)    else 'unk'
-        fname = filenames[i] if i < len(filenames) else f'sample{i}'
-        cidx  = chunk_indices[i] if i < len(chunk_indices) else 0
-        stem  = os.path.splitext(fname)[0]
-        tag   = f'{row:03d}_{lbl}_{stem}_chunk{cidx}'
 
-        inp = inputs[i]
-        rec = recons[i]
+    # Map filename → full path via the dataset
+    path_map = {os.path.basename(str(p)): str(p)
+                for p in data_loader.dataset.path_to_data}
 
-        # Invert NormalizeSpecDb: dB = (norm - 1) * 40
-        inp_db = (inp - 1.0) * 40.0
-        rec_db = (rec - 1.0) * 40.0
+    seen = set()
+    row = 0
+    for i in sample_indices:
+        fname = filenames[i] if i < len(filenames) else None
+        lbl   = labels[i]   if i < len(labels)    else 'unk'
+        if fname is None or fname in seen:
+            continue
+        seen.add(fname)
 
-        y_orig  = mel_chunk_to_audio(inp_db, sr=sr, n_fft=n_fft, hop_length=hop_length)
-        y_recon = mel_chunk_to_audio(rec_db, sr=sr, n_fft=n_fft, hop_length=hop_length)
+        npy_path = path_map.get(fname)
+        if npy_path is None:
+            print(f'  Warning: could not find path for {fname}')
+            continue
 
+        y_orig, y_recon, _, _ = reconstruct_full_file(
+            model, npy_path, device, sr=sr, n_fft=n_fft, hop_length=hop_length)
+
+        stem = os.path.splitext(fname)[0]
+        tag  = f'{row:03d}_{lbl}_{stem}'
         sf.write(os.path.join(out_dir, f'{tag}_original.wav'),
                  y_orig  / (np.abs(y_orig).max()  + 1e-8), sr)
         sf.write(os.path.join(out_dir, f'{tag}_recon.wav'),
                  y_recon / (np.abs(y_recon).max() + 1e-8), sr)
+        row += 1
 
-    print(f'Saved  {len(sample_indices)} audio pairs → {out_dir}/')
+    print(f'Saved  {row} full-file audio pairs → {out_dir}/')
 
 
 # ---------------------------------------------------------------------------
@@ -268,8 +320,42 @@ def main(config, resume, n_samples, out_dir):
     plot_kl_per_dim(mu, logvar,
                     os.path.join(out_dir, 'kl_per_dim.png'))
 
-    save_audio_samples(inputs, recons, labels, filenames, chunk_indices,
-                       sample_indices, os.path.join(out_dir, 'audio'))
+    save_audio_samples(model, data_loader, labels, filenames, chunk_indices,
+                       sample_indices, os.path.join(out_dir, 'audio'), device)
+
+    # Full-file spectrogram plots
+    path_map = {os.path.basename(str(p)): str(p)
+                for p in data_loader.dataset.path_to_data}
+    seen = set()
+    for row, i in enumerate(sample_indices):
+        fname = filenames[i]
+        lbl   = labels[i]
+        if fname in seen:
+            continue
+        seen.add(fname)
+        npy_path = path_map.get(fname)
+        if npy_path is None:
+            continue
+        _, _, orig_full, recon_full = reconstruct_full_file(
+            model, npy_path, device)
+        diff = orig_full - recon_full
+        fig, axes = plt.subplots(1, 3, figsize=(14, 3))
+        for ax, data, title, cmap, vmin, vmax in [
+            (axes[0], orig_full,  f'Input [{lbl}] {fname}', 'magma', -1, 1),
+            (axes[1], recon_full, 'Reconstruction',          'magma', -1, 1),
+            (axes[2], diff,       'Difference',     'RdBu_r',
+             -np.abs(diff).max(), np.abs(diff).max()),
+        ]:
+            im = ax.imshow(data, aspect='auto', origin='lower',
+                           cmap=cmap, vmin=vmin, vmax=vmax)
+            plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            ax.set_title(title, fontsize=8)
+            ax.set_xlabel('Time frame'); ax.set_ylabel('Mel bin')
+        fig.tight_layout()
+        out_path = os.path.join(out_dir, f'{row:03d}_{lbl}_{os.path.splitext(fname)[0]}_fullfile.png')
+        fig.savefig(out_path, dpi=120, bbox_inches='tight')
+        plt.close(fig)
+        print(f'Saved  {out_path}')
 
 
 if __name__ == '__main__':
@@ -281,8 +367,8 @@ if __name__ == '__main__':
     parser.add_argument('-d', '--device', default=None)
     parser.add_argument('-n', '--n_samples', type=int, default=6,
                         help='number of spectrogram chunks to visualise/save as audio')
-    parser.add_argument('-o', '--out_dir', default='eval_output',
-                        help='directory for output files (default: eval_output/)')
+    parser.add_argument('-o', '--out_dir', default='eval/run',
+                        help='directory for output files (default: eval/run/)')
 
     args = parser.parse_args()
     config = ConfigParser(parser)
