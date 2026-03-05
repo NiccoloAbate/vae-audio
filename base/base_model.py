@@ -131,7 +131,7 @@ class BaseGMVAE(BaseModel):
 
 def sampling_gaussian(mu, logvar):
     sigma = torch.sqrt(torch.exp(logvar))
-    eps = torch.distributions.normal.Normal(0, 1).sample(sample_shape=sigma.size())
+    eps = torch.randn_like(sigma)
     z = mu + sigma * eps  # reparameterization trick
     return mu, logvar, z
 
