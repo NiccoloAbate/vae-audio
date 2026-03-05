@@ -283,6 +283,215 @@ def save_audio_samples(model, data_loader, labels, filenames, chunk_indices,
 
 
 # ---------------------------------------------------------------------------
+# latent space interpolation & traversal
+# ---------------------------------------------------------------------------
+
+def slerp(z1, z2, t):
+    """
+    Spherical linear interpolation between two latent vectors.
+
+    Why slerp instead of lerp?
+    In a d-dimensional isotropic Gaussian N(0,I), probability mass concentrates
+    on a thin shell of radius √d as d grows.  A straight line (lerp) between two
+    points on that shell cuts through the low-probability interior.  Slerp stays
+    on the shell, keeping every interpolated point in a high-probability region.
+
+    Formula:  z(t) = sin((1-t)ω)/sin(ω) · z1 + sin(t·ω)/sin(ω) · z2
+    where ω = arccos(z1̂ · z2̂)  (angle between unit vectors).
+    Falls back to lerp when z1 ≈ z2 (ω ≈ 0).
+    """
+    z1_n = z1 / (z1.norm() + 1e-8)
+    z2_n = z2 / (z2.norm() + 1e-8)
+    omega = torch.acos(torch.clamp((z1_n * z2_n).sum(), -1.0, 1.0))
+    if omega.abs() < 1e-6:
+        return (1 - t) * z1 + t * z2
+    return (torch.sin((1 - t) * omega) * z1 +
+            torch.sin(t * omega) * z2) / torch.sin(omega)
+
+
+def get_file_latent(model, npy_path, device, chunk_size=15):
+    """Encode the middle chunk of a file and return its latent mean (D,)."""
+    spec = np.load(npy_path)
+    spec_norm = spec / 40.0 + 1.0
+    n_chunks = spec_norm.shape[1] // chunk_size
+    mid = n_chunks // 2
+    chunk = spec_norm[:, mid*chunk_size:(mid+1)*chunk_size]
+    x = torch.tensor(chunk, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
+    with torch.no_grad():
+        mu, _, _ = model.encode(x)
+    return mu.squeeze(0).cpu()
+
+
+def decode_latent(model, z, device):
+    """Decode a single latent vector (D,) → spectrogram (F, T) on CPU."""
+    with torch.no_grad():
+        x_recon = model.decode(z.unsqueeze(0).to(device))
+    return x_recon.squeeze(0).cpu().numpy()
+
+
+def plot_interpolations(model, data_loader, labels, filenames, chunk_indices,
+                        sample_indices, device, n_steps=8, out_dir='.'):
+    """
+    For each consecutive pair in sample_indices (from different files), interpolate
+    between their latent means using both lerp and slerp.  Saves:
+      - interp_<i>_<j>_grid.png  : spectrogram grid (lerp top, slerp bottom)
+      - interp_audio/             : wav files at each lerp step
+    """
+    path_map = {os.path.basename(str(p)): str(p)
+                for p in data_loader.dataset.path_to_data}
+
+    # Collect one latent per unique file from sample_indices
+    seen, file_latents, file_meta = set(), [], []
+    for i in sample_indices:
+        fname = filenames[i]
+        if fname in seen:
+            continue
+        seen.add(fname)
+        npy_path = path_map.get(fname)
+        if npy_path is None:
+            continue
+        z = get_file_latent(model, npy_path, device)
+        file_latents.append(z)
+        file_meta.append((fname, labels[i]))
+
+    if len(file_latents) < 2:
+        print('  Not enough files for interpolation.')
+        return
+
+    ts = np.linspace(0, 1, n_steps)
+    audio_dir = os.path.join(out_dir, 'interp_audio')
+    os.makedirs(audio_dir, exist_ok=True)
+
+    # Pair up consecutive files
+    for pair_idx in range(len(file_latents) - 1):
+        z1, z2 = file_latents[pair_idx], file_latents[pair_idx + 1]
+        fname1, lbl1 = file_meta[pair_idx]
+        fname2, lbl2 = file_meta[pair_idx + 1]
+        stem1, stem2 = os.path.splitext(fname1)[0], os.path.splitext(fname2)[0]
+
+        lerp_specs, slerp_specs = [], []
+        for t in ts:
+            t_t = torch.tensor(t, dtype=torch.float32)
+            z_lerp  = (1 - t_t) * z1 + t_t * z2
+            z_slerp = slerp(z1, z2, t_t)
+            lerp_specs.append(decode_latent(model, z_lerp,  device))
+            slerp_specs.append(decode_latent(model, z_slerp, device))
+
+        # Spectrogram grid: lerp (top row) and slerp (bottom row)
+        fig, axes = plt.subplots(2, n_steps, figsize=(2.2 * n_steps, 5),
+                                 sharex=True, sharey=True)
+        vmin, vmax = -1, 1
+        for col, t in enumerate(ts):
+            for row, (specs, method) in enumerate([(lerp_specs, 'lerp'),
+                                                   (slerp_specs, 'slerp')]):
+                ax = axes[row, col]
+                ax.imshow(specs[col], aspect='auto', origin='lower',
+                          cmap='magma', vmin=vmin, vmax=vmax)
+                ax.set_xticks([]); ax.set_yticks([])
+                if col == 0:
+                    ax.set_ylabel(method, fontsize=9)
+                if row == 0:
+                    ax.set_title(f't={t:.2f}', fontsize=7)
+        fig.suptitle(f'Interpolation:  [{lbl1}] {stem1}  →  [{lbl2}] {stem2}',
+                     fontsize=9)
+        fig.tight_layout()
+        grid_path = os.path.join(out_dir,
+                                 f'interp_{pair_idx:02d}_{stem1}_to_{stem2}_grid.png')
+        fig.savefig(grid_path, dpi=120, bbox_inches='tight')
+        plt.close(fig)
+        print(f'Saved  {grid_path}')
+
+        # Audio: lerp steps only
+        for col, (t, spec) in enumerate(zip(ts, lerp_specs)):
+            spec_db = (spec - 1.0) * 40.0
+            y = mel_to_audio(spec_db)
+            wav_path = os.path.join(
+                audio_dir,
+                f'interp_{pair_idx:02d}_{stem1}_to_{stem2}_t{t:.2f}.wav')
+            sf.write(wav_path, y / (np.abs(y).max() + 1e-8), 22050)
+    print(f'Saved  interpolation audio → {audio_dir}/')
+
+
+def compute_smoothness(model, mu_all, device, n_pairs=20, n_steps=16):
+    """
+    Quantitative smoothness score: average rate of change of decoded output
+    per unit step in latent space along linear interpolation paths.
+
+        S = mean_{pairs} mean_{steps} ‖decode(z_{t+1}) − decode(z_t)‖_F
+                                      ─────────────────────────────────
+                                          ‖z_{t+1} − z_t‖_2
+
+    A lower score means the decoder changes more smoothly with latent position.
+    Computed on random pairs drawn from the test set latent means.
+    """
+    N = mu_all.size(0)
+    rng = np.random.default_rng(0)
+    idx_a = rng.choice(N, n_pairs, replace=False)
+    idx_b = rng.choice(N, n_pairs, replace=False)
+
+    ts = torch.linspace(0, 1, n_steps + 1)
+    scores = []
+    with torch.no_grad():
+        for a, b in zip(idx_a, idx_b):
+            z1, z2 = mu_all[a], mu_all[b]
+            step_latent = (z2 - z1).norm().item() / n_steps
+            if step_latent < 1e-8:
+                continue
+            prev = decode_latent(model, (ts[0] * z2 + (1 - ts[0]) * z1), device)
+            for t in ts[1:]:
+                curr = decode_latent(model, (t * z2 + (1 - t) * z1), device)
+                spec_change = np.linalg.norm(curr - prev, 'fro')
+                scores.append(spec_change / step_latent)
+                prev = curr
+
+    score = float(np.mean(scores))
+    print(f'  Smoothness score (lower = smoother): {score:.4f}')
+    return score
+
+
+def plot_pca_traversal(model, mu_all, device, n_components=3, n_steps=7, out_dir='.'):
+    """
+    Traverse the top PCA directions of the latent space, decoding at each step.
+
+    Starting from the dataset mean, move ±3σ along each principal component.
+    This reveals what each learned direction encodes perceptually.
+
+    Produces one PNG per PC showing decoded spectrograms at each position.
+    """
+    pca = PCA(n_components=n_components)
+    pca.fit(mu_all.numpy())
+    mu_mean = torch.tensor(pca.mean_, dtype=torch.float32)
+
+    for pc_idx in range(n_components):
+        direction = torch.tensor(pca.components_[pc_idx], dtype=torch.float32)
+        sigma = float(np.sqrt(pca.explained_variance_[pc_idx]))
+        alphas = np.linspace(-3 * sigma, 3 * sigma, n_steps)
+
+        specs = []
+        for alpha in alphas:
+            z = mu_mean + alpha * direction
+            specs.append(decode_latent(model, z, device))
+
+        var_ratio = pca.explained_variance_ratio_[pc_idx] * 100
+        fig, axes = plt.subplots(1, n_steps, figsize=(2.2 * n_steps, 3),
+                                 sharex=True, sharey=True)
+        for col, (alpha, spec) in enumerate(zip(alphas, specs)):
+            ax = axes[col]
+            ax.imshow(spec, aspect='auto', origin='lower',
+                      cmap='magma', vmin=-1, vmax=1)
+            ax.set_xticks([]); ax.set_yticks([])
+            ax.set_title(f'{alpha:+.1f}', fontsize=7)
+        axes[0].set_ylabel('Mel bin', fontsize=8)
+        fig.suptitle(f'PC {pc_idx + 1}  ({var_ratio:.1f}% variance)  '
+                     f'— traversal from −3σ to +3σ', fontsize=9)
+        fig.tight_layout()
+        out_path = os.path.join(out_dir, f'pca_traversal_pc{pc_idx + 1}.png')
+        fig.savefig(out_path, dpi=120, bbox_inches='tight')
+        plt.close(fig)
+        print(f'Saved  {out_path}')
+
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
@@ -322,6 +531,17 @@ def main(config, resume, n_samples, out_dir):
 
     save_audio_samples(model, data_loader, labels, filenames, chunk_indices,
                        sample_indices, os.path.join(out_dir, 'audio'), device)
+
+    print('\nLatent space analysis…')
+    print('  Interpolations:')
+    plot_interpolations(model, data_loader, labels, filenames, chunk_indices,
+                        sample_indices, device, n_steps=8, out_dir=out_dir)
+
+    print('  Smoothness score:')
+    compute_smoothness(model, mu, device)
+
+    print('  PCA traversal:')
+    plot_pca_traversal(model, mu, device, n_components=3, out_dir=out_dir)
 
     # Full-file spectrogram plots
     path_map = {os.path.basename(str(p)): str(p)
