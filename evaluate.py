@@ -100,14 +100,12 @@ def select_sample_indices(filenames, chunk_indices, n_samples):
 
 
 def mel_to_audio(spec_db, sr=22050, n_fft=2048, hop_length=735):
-    """Convert a (64, T) dB mel spectrogram to a waveform via Griffin-Lim."""
+    """Convert a (:, T) dB mel spectrogram to a waveform via Griffin-Lim."""
     S_power = librosa.db_to_power(spec_db.astype(np.float32))
-    return librosa.feature.inverse.mel_to_audio(
-        S_power, sr=sr, n_fft=n_fft, hop_length=hop_length, n_iter=64)
+    return librosa.feature.inverse.mel_to_audio(S_power, sr=sr, n_fft=n_fft, hop_length=hop_length, n_iter=256)
 
 
-def reconstruct_full_file(model, npy_path, device,
-                          chunk_size=15, sr=22050, n_fft=2048, hop_length=735):
+def reconstruct_full_file(model, npy_path, device, chunk_size=15, sr=22050, n_fft=2048, hop_length=735):
     """
     Reconstruct a full audio file by:
       1. Loading the pre-computed mel spectrogram (.npy, shape (64, N_frames))
@@ -158,8 +156,7 @@ def plot_spectrograms(inputs, recons, labels, filenames, chunk_indices,
     """Plot input vs reconstruction for selected chunks (one per file)."""
     n = len(sample_indices)
     fig = plt.figure(figsize=(14, 3 * n))
-    gs = gridspec.GridSpec(n, 3, figure=fig,
-                           width_ratios=[1, 1, 1], hspace=0.5, wspace=0.35)
+    gs = gridspec.GridSpec(n, 3, figure=fig, width_ratios=[1, 1, 1], hspace=0.5, wspace=0.35)
 
     for row, i in enumerate(sample_indices):
         inp  = inputs[i].numpy()
@@ -172,8 +169,7 @@ def plot_spectrograms(inputs, recons, labels, filenames, chunk_indices,
 
         im0 = ax_in.imshow(inp,  aspect='auto', origin='lower', cmap='magma')
         im1 = ax_rec.imshow(rec, aspect='auto', origin='lower', cmap='magma')
-        im2 = ax_dif.imshow(diff, aspect='auto', origin='lower',
-                            cmap='RdBu_r',
+        im2 = ax_dif.imshow(diff, aspect='auto', origin='lower', cmap='RdBu_r',
                             vmin=-np.abs(diff).max(), vmax=np.abs(diff).max())
 
         plt.colorbar(im0, ax=ax_in,  fraction=0.046, pad=0.04)
@@ -191,8 +187,7 @@ def plot_spectrograms(inputs, recons, labels, filenames, chunk_indices,
             ax.set_ylabel('Mel bin', fontsize=7)
             ax.tick_params(labelsize=6)
 
-    plt.suptitle('SpecVAE: input vs reconstruction  (both normalised to (−1, 1))',
-                 fontsize=10)
+    plt.suptitle('SpecVAE: input vs reconstruction  (both normalised to (−1, 1))', fontsize=10)
     fig.savefig(out_path, dpi=120, bbox_inches='tight')
     plt.close(fig)
     print(f'Saved  {out_path}')
@@ -209,9 +204,7 @@ def plot_latent_pca(mu, labels, out_path):
     fig, ax = plt.subplots(figsize=(6, 5))
     for lbl in unique_labels:
         mask = np.array([l == lbl for l in labels])
-        ax.scatter(z2[mask, 0], z2[mask, 1],
-                   c=[colour_map(label_to_idx[lbl])],
-                   label=lbl, alpha=0.6, s=15)
+        ax.scatter(z2[mask, 0], z2[mask, 1], c=[colour_map(label_to_idx[lbl])], label=lbl, alpha=0.6, s=15)
     ax.set_xlabel('PC 1'); ax.set_ylabel('PC 2')
     ax.set_title('Latent space — 2-D PCA of q(z|x) means')
     ax.legend(title='class', fontsize=8)
@@ -273,13 +266,33 @@ def save_audio_samples(model, data_loader, labels, filenames, chunk_indices,
 
         stem = os.path.splitext(fname)[0]
         tag  = f'{row:03d}_{lbl}_{stem}'
-        sf.write(os.path.join(out_dir, f'{tag}_original.wav'),
+        sf.write(os.path.join(out_dir, f'{tag}_mel_orig.wav'),
                  y_orig  / (np.abs(y_orig).max()  + 1e-8), sr)
         sf.write(os.path.join(out_dir, f'{tag}_recon.wav'),
                  y_recon / (np.abs(y_recon).max() + 1e-8), sr)
+
+        # Try to save the actual source wav for a true quality comparison
+        # npy path: .../medley_subset/{dataset_name}/{split}/{label}/{stem}.npy
+        # wav path: .../medley_subset/audio/{split}/{label}/{stem}.wav
+        try:
+            import pathlib
+            npy = pathlib.Path(npy_path)
+            # npy: .../medley_subset/{dataset_name}/{split}/{label}/{stem}.npy
+            # wav: .../medley_subset/audio/{split}/{label}/{stem}.wav
+            wav_path = npy.parent.parent.parent.parent / 'audio' / npy.parent.parent.name / npy.parent.name / (npy.stem + '.wav')
+            if wav_path.exists():
+                y_src, src_sr = librosa.load(str(wav_path), sr=sr, duration=None)
+                sf.write(os.path.join(out_dir, f'{tag}_source.wav'),
+                         y_src / (np.abs(y_src).max() + 1e-8), sr)
+            else:
+                print(f'  (source wav not found at {wav_path})')
+        except Exception as e:
+            print(f'  (could not save source wav: {e})')
+
         row += 1
 
-    print(f'Saved  {row} full-file audio pairs → {out_dir}/')
+    print(f'Saved  {row} full-file audio triplets → {out_dir}/'
+          '  (source = actual wav, mel_orig = mel→Griffin-Lim, recon = VAE→Griffin-Lim)')
 
 
 # ---------------------------------------------------------------------------
@@ -580,15 +593,11 @@ def main(config, resume, n_samples, out_dir):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='SpecVAE evaluation')
-    parser.add_argument('-r', '--resume', required=True,
-                        help='path to checkpoint')
-    parser.add_argument('-c', '--config', default=None,
-                        help='config file (inferred from checkpoint dir if omitted)')
+    parser.add_argument('-r', '--resume', required=True, help='path to checkpoint')
+    parser.add_argument('-c', '--config', default=None, help='config file (inferred from checkpoint dir if omitted)')
     parser.add_argument('-d', '--device', default=None)
-    parser.add_argument('-n', '--n_samples', type=int, default=6,
-                        help='number of spectrogram chunks to visualise/save as audio')
-    parser.add_argument('-o', '--out_dir', default='eval/run',
-                        help='directory for output files (default: eval/run/)')
+    parser.add_argument('-n', '--n_samples', type=int, default=6, help='number of spectrogram chunks to visualise/save as audio')
+    parser.add_argument('-o', '--out_dir', default='eval/run', help='directory for output files (default: eval/run/)')
 
     args = parser.parse_args()
     config = ConfigParser(parser)

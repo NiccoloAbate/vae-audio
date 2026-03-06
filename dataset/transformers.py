@@ -149,6 +149,7 @@ class LoadNumpyAry:
 class NormalizeSpecDb:
     """
     Map dB mel spectrograms from (-80, 0) to (-1, 1) using the fixed linear transform
+    Works for any number of mel bins — the dB range from power_to_db is always (-80, 0).
         x_norm = x / 40 + 1
     This matches the Tanh output range of the decoder.
     Inverse: x_db = (x_norm - 1) * 40

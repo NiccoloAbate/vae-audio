@@ -1,37 +1,37 @@
 {
-    "name": "SpecVAE",
+    "name": "SpecVAE_Medley_Large",
     "n_gpu": 1,
 
     "arch": {
         "type": "SpecVAE",
         "args": {
-            "input_size": [128, 15],
-            "latent_dim": 32,
+            "input_size": [64, 15],
+            "latent_dim": 64,
             "is_featExtract": false,
-            "n_convLayer": 3,
-            "n_convChannel": [32, 16, 8],
-            "filter_size": [1, 3, 3],
-            "stride": [1, 2, 2],
-            "n_fcLayer": 1,
-            "n_fcChannel": [256]
+            "n_convLayer": 4,
+            "n_convChannel": [64, 32, 16, 8],
+            "filter_size": [1, 3, 3, 3],
+            "stride": [1, 2, 1, 1],
+            "n_fcLayer": 2,
+            "n_fcChannel": [512, 256]
         }
     },
     "data_loader": {
         "type": "CollectDataLoader",
         "args":{
-            "data_dir": ["dataset/medley_subset/m128-medley"],
-            "batch_size": 32,
+            "data_dir": ["dataset/medley_subset/m64-medley"],
+            "batch_size": 64,
             "shuffle": true,
             "validation_split": 0.1,
-            "num_workers": 0,
+            "num_workers": 4,
             "subset": "train"
         }
     },
     "optimizer": {
         "type": "Adam",
         "args":{
-            "lr": 0.001,
-            "weight_decay": 0,
+            "lr": 0.0005,
+            "weight_decay": 1e-5,
             "amsgrad": true
         }
     },
@@ -42,20 +42,20 @@
     "lr_scheduler": {
         "type": "StepLR",
         "args": {
-            "step_size": 200,
-            "gamma": 0.1
+            "step_size": 100,
+            "gamma": 0.5
         }
     },
     "trainer": {
         "type": "SpecVaeTrainer",
-        "epochs": 1000,
+        "epochs": 500,
 
         "save_dir": "saved/",
-        "save_period": 10,
+        "save_period": 20,
         "verbosity": 2,
         
         "monitor": "min val_loss",
-        "early_stop": 50,
+        "early_stop": 30,
         
         "tensorboardX": true
     }
