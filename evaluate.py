@@ -117,43 +117,33 @@ def select_sample_indices(filenames, chunk_indices, n_samples, labels=None):
     return selected
 
 
-_vocos_model = None
+def mel_to_audio(spec_norm, sr=22050, n_iter=256):
+    """Convert a normalised dB mel spectrogram (-1, 1) to a waveform via Griffin-Lim.
 
-def _get_vocos():
-    global _vocos_model
-    if _vocos_model is None:
-        from vocos import Vocos
-        _vocos_model = Vocos.from_pretrained('charactr/vocos-mel-24khz')
-        _vocos_model.eval()
-    return _vocos_model
-
-
-def mel_to_audio(spec_norm, sr=24000):
-    """Convert a normalised safe_log mel spectrogram (-1, 1) to a waveform via Vocos.
-
-    Denormalises with the inverse of SafeLogNorm: safe_log = spec_norm * 8 - 3.
+    Denormalises with the inverse of NormalizeSpecDb: dB = (spec_norm - 1) * 40.
     """
-    vocos = _get_vocos()
-    mel = torch.tensor(spec_norm * 8.0 - 3.0, dtype=torch.float32).unsqueeze(0)  # (1, n_mels, T)
-    with torch.no_grad():
-        y = vocos.decode(mel)
-    return y.squeeze(0).numpy()
+    mel_db = (spec_norm - 1.0) * 40.0          # back to dB in [-80, 0]
+    mel_power = librosa.db_to_power(mel_db)     # power mel spectrogram
+    y = librosa.feature.inverse.mel_to_audio(
+        mel_power, sr=sr, n_iter=n_iter,
+        n_fft=2048, hop_length=735)
+    return y
 
 
-def reconstruct_full_file(model, npy_path, device, chunk_size=47, sr=24000):
+def reconstruct_full_file(model, npy_path, device, chunk_size=15, sr=22050):
     """
     Reconstruct a full audio file by:
       1. Loading the pre-computed mel spectrogram (.npy, shape (n_mels, N_frames))
-      2. Normalising to (-1, 1) via SafeLogNorm
+      2. Normalising to (-1, 1) via NormalizeSpecDb
       3. Splitting into non-overlapping chunks of chunk_size frames
       4. Passing each chunk through the VAE
       5. Concatenating reconstructed chunks along the time axis
-      6. Decoding both original and reconstruction to audio via Vocos
+      6. Decoding both original and reconstruction to audio via Griffin-Lim
 
     Returns (y_orig, y_recon, spec_norm, recon_full) — all numpy arrays.
     """
-    spec = np.load(npy_path)                       # (n_mels, N_frames), safe_log
-    spec_norm = (spec + 3.0) / 8.0                 # normalise to (-1, 1)
+    spec = np.load(npy_path)                       # (n_mels, N_frames), dB mel
+    spec_norm = spec / 40.0 + 1.0                  # normalise to (-1, 1)
 
     # Slice into non-overlapping chunks (same logic as SpecChunking)
     n_frames = spec_norm.shape[1]
@@ -270,7 +260,7 @@ def plot_kl_per_dim(mu, logvar, out_path):
 
 def save_audio_samples(model, data_loader, labels, filenames, chunk_indices,
                        sample_indices, out_dir, device,
-                       sr=24000):
+                       sr=22050):
     """
     For each selected sample, reconstruct the full source file (not just one chunk)
     by concatenating VAE reconstructions of all non-overlapping chunks.
@@ -340,7 +330,7 @@ def save_audio_samples(model, data_loader, labels, filenames, chunk_indices,
         row += 1
 
     print(f'Saved  {row} full-file audio triplets → {out_dir}/'
-          '  (source = actual wav, mel_orig = mel→Vocos, recon = VAE→Vocos)')
+          '  (source = actual wav, mel_orig = mel→Griffin-Lim, recon = VAE→Griffin-Lim)')
 
 
 # ---------------------------------------------------------------------------
@@ -370,10 +360,10 @@ def slerp(z1, z2, t):
             torch.sin(t * omega) * z2) / torch.sin(omega)
 
 
-def get_file_latent(model, npy_path, device, chunk_size=47):
+def get_file_latent(model, npy_path, device, chunk_size=15):
     """Encode the middle chunk of a file and return its latent mean (D,)."""
     spec = np.load(npy_path)
-    spec_norm = (spec + 3.0) / 8.0
+    spec_norm = spec / 40.0 + 1.0
     n_chunks = spec_norm.shape[1] // chunk_size
     mid = n_chunks // 2
     chunk = spec_norm[:, mid*chunk_size:(mid+1)*chunk_size]
@@ -468,7 +458,7 @@ def plot_interpolations(model, data_loader, labels, filenames, chunk_indices,
             wav_path = os.path.join(
                 audio_dir,
                 f'interp_{pair_idx:02d}_{stem1}_to_{stem2}_t{t:.2f}.wav')
-            sf.write(wav_path, y / (np.abs(y).max() + 1e-8), 24000)
+            sf.write(wav_path, y / (np.abs(y).max() + 1e-8), 22050)
     print(f'Saved  interpolation audio → {audio_dir}/')
 
 

@@ -35,7 +35,7 @@ class SpecVaeTrainer(BaseTrainer):
     def _forward_and_computeLoss(self, x, target):
         x_recon, mu, logvar, z = self.model(x)
         loss_recon, loss_kl = self.loss(mu, logvar, x_recon, target.squeeze(1))
-        loss = loss_recon + loss_kl
+        loss = loss_recon + 0.1 * loss_kl
         return loss, loss_recon, loss_kl
 
     def _train_epoch(self, epoch):
