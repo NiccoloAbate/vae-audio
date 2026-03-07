@@ -19,7 +19,7 @@
     "data_loader": {
         "type": "CollectDataLoader",
         "args":{
-            "data_dir": ["dataset/ESC-50/m100-esc50"],
+            "data_dir": ["dataset/myAudioDataset/m100-myaudio"],
             "batch_size": 32,
             "shuffle": true,
             "validation_split": 0.1,

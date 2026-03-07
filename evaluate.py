@@ -95,10 +95,23 @@ def select_sample_indices(filenames, chunk_indices, n_samples, labels=None):
         key_to_file_to_indices.setdefault(lbl, {}).setdefault(fname, []).append(i)
 
     selected = []
-    # One file per label, cycling through labels until we have enough
-    for lbl, file_map in key_to_file_to_indices.items():
-        fname, idxs = next(iter(file_map.items()))
-        selected.append(idxs[len(idxs) // 2])
+    # First pass: one file per label for diversity
+    # Second pass: additional files from each label until n_samples reached
+    all_file_idxs = [
+        idxs[len(idxs) // 2]
+        for file_map in key_to_file_to_indices.values()
+        for idxs in file_map.values()
+    ]
+    label_first = [
+        next(iter(file_map.values()))[len(next(iter(file_map.values()))) // 2]
+        for file_map in key_to_file_to_indices.values()
+    ]
+    # Add one per label first, then fill remaining slots from all files
+    seen = set()
+    for idx in label_first + all_file_idxs:
+        if idx not in seen:
+            seen.add(idx)
+            selected.append(idx)
         if len(selected) >= n_samples:
             break
     return selected
