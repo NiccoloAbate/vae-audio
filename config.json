@@ -5,21 +5,21 @@
     "arch": {
         "type": "SpecVAE",
         "args": {
-            "input_size": [128, 15],
+            "input_size": [100, 47],
             "latent_dim": 32,
             "is_featExtract": false,
             "n_convLayer": 3,
-            "n_convChannel": [32, 16, 8],
+            "n_convChannel": [64, 32, 16],
             "filter_size": [1, 3, 3],
             "stride": [1, 2, 2],
             "n_fcLayer": 1,
-            "n_fcChannel": [256]
+            "n_fcChannel": [512]
         }
     },
     "data_loader": {
         "type": "CollectDataLoader",
         "args":{
-            "data_dir": ["dataset/medley_subset/m128-medley"],
+            "data_dir": ["dataset/ESC-50/m100-esc50"],
             "batch_size": 32,
             "shuffle": true,
             "validation_split": 0.1,
@@ -55,7 +55,7 @@
         "verbosity": 2,
         
         "monitor": "min val_loss",
-        "early_stop": 50,
+        "early_stop": 100,
         
         "tensorboardX": true
     }

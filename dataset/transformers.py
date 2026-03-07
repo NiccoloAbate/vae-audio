@@ -14,6 +14,30 @@ class AudioRead:
         return y
 
 
+class TorchAudioRead:
+    """Load audio using torchaudio + resample with torchaudio.
+    Required for Vocos compatibility: torchaudio and librosa use different
+    resampling algorithms, causing audible mel spectrogram differences.
+    """
+    def __init__(self, sr=24000, duration=None):
+        import torchaudio as _ta
+        self.sr = sr
+        self.duration = duration
+
+    def __call__(self, x):
+        import torch
+        import torchaudio
+        y, src_sr = torchaudio.load(str(x))
+        if src_sr != self.sr:
+            y = torchaudio.functional.resample(y, src_sr, self.sr)
+        if y.shape[0] > 1:
+            y = y.mean(0, keepdim=True)
+        if self.duration is not None:
+            max_samples = int(self.duration * self.sr)
+            y = y[:, :max_samples]
+        return y.squeeze(0).numpy()
+
+
 class Zscore:
     def __init__(self, divide_sigma=False):
         self.divide_sigma = divide_sigma
@@ -47,21 +71,33 @@ class PadAudio:
 
 
 class Spectrogram:
-    def __init__(self, sr=22050, n_fft=2048, hop_size=735, n_band=64, spec_type='mel'):
+    def __init__(self, sr=22050, n_fft=2048, hop_size=735, n_band=64, spec_type='mel',
+                 power=2, safe_log=False):
         """
         Derive spectrogram. Currently accept linear and Mel spectrogram.
-        As the default input duration of spectrograms is 0.5s to the VAE,
-        the default values of sr and hop_size are such that a 0.5s spectrogram has 15 frames,
-        which is small enough ([f, t] = [64, 15]) to keep small number of parameters of the VAE.
         :param n_fft: size of short-time fourier transform
         :param hop_size: short-time window hop size
         :param n_band: number of frequency bins, ignored if spec_type='linear'
+        :param power: mel spectrogram exponent (1=amplitude, 2=power)
+        :param safe_log: if True, apply log(max(S, 1e-5)) instead of power_to_db.
+                         When safe_log=True, uses torchaudio (norm=None) instead of
+                         librosa (norm='slaney') to match Vocos's feature extractor exactly.
         """
         self.sr = sr
         self.n_fft = n_fft
         self.hop_size = hop_size
         self.n_band = n_band
         self.spec_type = spec_type
+        self.power = power
+        self.safe_log = safe_log
+
+        if safe_log and spec_type == 'mel':
+            import torch
+            import torchaudio
+            self._mel_transform = torchaudio.transforms.MelSpectrogram(
+                sample_rate=sr, n_fft=n_fft, hop_length=hop_size,
+                n_mels=n_band, center=True, power=power
+            )
 
     def __call__(self, x):
         assert self.spec_type in ['lin', 'mel', 'cqt'], "spec_type should be in ['lin', 'mel', 'cqt']"
@@ -70,11 +106,18 @@ class Spectrogram:
             S = np.abs(S) ** 2  # power spectrogram
 
         elif self.spec_type == 'mel':
-            S = librosa.feature.melspectrogram(y=x, sr=self.sr, n_fft=self.n_fft,
-                                               hop_length=self.hop_size, n_mels=self.n_band)
-            # melspectrogram has raised np.abs(S)**power, default power=2
-            # so power_to_db is directly applicable
-            S = librosa.core.power_to_db(S, ref=np.max)
+            if self.safe_log:
+                import torch
+                # Use torchaudio (norm=None) to match Vocos's feature extractor exactly.
+                # librosa uses norm='slaney' by default which is incompatible with Vocos.
+                y_t = torch.tensor(x, dtype=torch.float32).unsqueeze(0)  # (1, T)
+                S = self._mel_transform(y_t).squeeze(0).numpy()          # (n_mels, T)
+                S = np.log(np.maximum(S, 1e-5))
+            else:
+                S = librosa.feature.melspectrogram(y=x, sr=self.sr, n_fft=self.n_fft,
+                                                   hop_length=self.hop_size, n_mels=self.n_band,
+                                                   power=self.power)
+                S = librosa.core.power_to_db(S, ref=np.max)
         else:
             # TODO: implement CQT
             raise NotImplementedError
@@ -156,3 +199,15 @@ class NormalizeSpecDb:
     """
     def __call__(self, x):
         return x / 40.0 + 1.0
+
+
+class SafeLogNorm:
+    """
+    Map safe_log amplitude mel spectrograms to (-1, 1) using a fixed linear transform.
+    safe_log values (log of amplitude mel with Vocos params) span roughly (-11, 5).
+    We use the fixed map:  x_norm = (x + 3) / 8
+    which maps (-11, 5) → (-1, 1).
+    Inverse: x_safelog = x_norm * 8 - 3
+    """
+    def __call__(self, x):
+        return (x + 3.0) / 8.0
