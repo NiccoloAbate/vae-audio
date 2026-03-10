@@ -18,7 +18,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-LOG_BASE = Path('saved/log/RawAudioVAE')
+LOG_BASE_RAW  = Path('saved/log/RawAudioVAE')
+LOG_BASE_SPEC = Path('saved/log/SpecVAE')
 
 
 def latest_run(log_base):
@@ -26,6 +27,14 @@ def latest_run(log_base):
         if (run / 'info.log').exists():
             return run.name
     raise FileNotFoundError(f'No info.log found under {log_base}')
+
+
+def resolve_log_base(run_id):
+    """Return the log base dir that contains run_id, checking both model types."""
+    for base in [LOG_BASE_RAW, LOG_BASE_SPEC]:
+        if (base / run_id / 'info.log').exists():
+            return base
+    raise FileNotFoundError(f'Run {run_id} not found under RawAudioVAE or SpecVAE log dirs')
 
 
 def parse_log(log_path):
@@ -47,7 +56,8 @@ def parse_log(log_path):
 
 
 def plot_training(run_id, out_dir):
-    log_path = LOG_BASE / run_id / 'info.log'
+    log_base = resolve_log_base(run_id)
+    log_path = log_base / run_id / 'info.log'
     if not log_path.exists():
         raise FileNotFoundError(f'Log not found: {log_path}')
 
@@ -128,7 +138,7 @@ if __name__ == '__main__':
                         help='Output directory. Defaults to eval/<run_id>/.')
     args = parser.parse_args()
 
-    run_id  = args.run_id or latest_run(LOG_BASE)
+    run_id  = args.run_id or latest_run(LOG_BASE_RAW)
     out_dir = Path(args.out) if args.out else Path('eval') / run_id
     print(f'Run:    {run_id}')
     print(f'Output: {out_dir}\n')
