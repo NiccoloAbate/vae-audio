@@ -212,7 +212,10 @@ class RawAudioVaeTrainer(BaseTrainer):
         with torch.no_grad():
             for batch_idx, (data_idx, label, data) in enumerate(self.valid_data_loader):
                 x    = data.float().to(self.device)
-                loss, loss_recon, loss_kl = self._forward_and_computeLoss(x, epoch)
+                _, loss_recon, loss_kl = self._forward_and_computeLoss(x, epoch)
+                # Use fixed beta_max for validation so val_loss is a consistent
+                # epoch-independent metric for checkpoint selection.
+                loss = loss_recon + self.beta_max * loss_kl
                 self.writer.set_step(
                     (epoch - 1) * len(self.valid_data_loader) + batch_idx, 'valid')
                 self.writer.add_scalar('loss', loss.item())
