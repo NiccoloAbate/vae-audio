@@ -154,8 +154,8 @@ class RawAudioVaeTrainer(BaseTrainer):
         self.do_validation     = valid_data_loader is not None
         self.lr_scheduler      = lr_scheduler
         self.log_step          = int(np.sqrt(data_loader.batch_size))
-        self.beta_max      = 0.1   # final KL weight
-        self.beta_warmup   = 200   # epochs to ramp from 0 → beta_max
+        self.beta_max      = 0.05  # final KL weight
+        self.beta_warmup   = 100   # epochs to ramp from 0 → beta_max
 
     def _beta(self, epoch):
         """Linear KL warmup: 0 → beta_max over beta_warmup epochs."""

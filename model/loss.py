@@ -44,7 +44,7 @@ def kld_temporal(mu, logvar, free_bits=1.0):
     return kl.sum(dim=(1, 2)).mean()
 
 
-def raw_audio_vae_loss(y, y_hat, mu, logvar, free_bits=1.0):
+def raw_audio_vae_loss(y, y_hat, mu, logvar, free_bits=0.25):
     """Combined loss for RawAudioVAE: returns (recon_loss, kl_loss)."""
     return multi_res_stft_loss(y, y_hat), kld_temporal(mu, logvar, free_bits)
 

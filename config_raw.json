@@ -5,7 +5,7 @@
     "arch": {
         "type": "RawAudioVAE",
         "args": {
-            "latent_dim": 8,
+            "latent_dim": 32,
             "channels": [32, 64, 128, 256, 512],
             "strides": [4, 4, 4, 4]
         }
@@ -54,7 +54,7 @@
         "verbosity": 2,
 
         "monitor": "min val_loss",
-        "early_stop": 100,
+        "early_stop": 1000,
 
         "tensorboardX": true
     }
