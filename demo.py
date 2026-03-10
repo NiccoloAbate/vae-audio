@@ -17,6 +17,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import gradio as gr
+from sklearn.decomposition import PCA
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -120,6 +121,80 @@ def decode_to_audio(model, device, z_list):
 
 
 # ---------------------------------------------------------------------------
+# latent visualisation helpers
+# ---------------------------------------------------------------------------
+
+def pool_latents(z_list):
+    """Pool a list of (latent_dim,) tensors → single (latent_dim,) numpy vector (mean over chunks)."""
+    return torch.stack(z_list).mean(dim=0).numpy()
+
+
+def plot_latent_position(z1_list, z2_list, z3_list, z_cur_list, t_val, labels):
+    """Two-panel figure:
+      Left  — PCA scatter: endpoints + slerp path + current position.
+      Right — Latent heatmap: interpolated latent (latent_dim × n_chunks).
+    """
+    p1  = pool_latents(z1_list)
+    p2  = pool_latents(z2_list)
+    p3  = pool_latents(z3_list) if z3_list is not None else None
+    cur = pool_latents(z_cur_list)
+
+    endpoints = [p1, p2] + ([p3] if p3 is not None else [])
+    all_pts   = np.stack(endpoints + [cur])
+
+    n_components = min(2, all_pts.shape[0], all_pts.shape[1])
+    pca      = PCA(n_components=n_components)
+    proj     = pca.fit_transform(all_pts)
+    ep_proj  = proj[:-1]
+    cur_proj = proj[-1]
+
+    ts = np.linspace(0, 1, 60)
+    path_pts = []
+    for t_f in ts:
+        t_t = torch.tensor(t_f, dtype=torch.float32)
+        if p3 is None:
+            z_path = slerp(torch.tensor(p1), torch.tensor(p2), t_t).numpy()
+        else:
+            if t_f <= 0.5:
+                z_path = slerp(torch.tensor(p1), torch.tensor(p2), t_t * 2).numpy()
+            else:
+                z_path = slerp(torch.tensor(p2), torch.tensor(p3), (t_t - 0.5) * 2).numpy()
+        path_pts.append(z_path)
+    path_proj = pca.transform(np.stack(path_pts))
+
+    colours = ['#4C9BE8', '#E8724C', '#4CE87A']
+    fig, (ax_pca, ax_heat) = plt.subplots(1, 2, figsize=(10, 3.5))
+
+    # --- PCA scatter ---
+    ax_pca.plot(path_proj[:, 0], path_proj[:, 1],
+                '--', color='#aaaaaa', linewidth=1, zorder=1)
+    for i, (pt, lbl) in enumerate(zip(ep_proj, labels)):
+        ax_pca.scatter(*pt, color=colours[i], s=120, zorder=3, label=lbl)
+        ax_pca.annotate(lbl, pt, textcoords='offset points',
+                        xytext=(6, 4), fontsize=8, color=colours[i])
+    ax_pca.scatter(*cur_proj, color='white', s=160, zorder=4,
+                   edgecolors='black', linewidths=1.5, marker='*',
+                   label=f't={t_val/100:.2f}')
+    ax_pca.set_title('Latent PCA — interpolation position', fontsize=9)
+    ax_pca.set_xlabel('PC 1', fontsize=8); ax_pca.set_ylabel('PC 2', fontsize=8)
+    ax_pca.tick_params(labelsize=7)
+
+    # --- Latent heatmap (latent_dim × n_chunks) ---
+    heat = torch.stack(z_cur_list).numpy().T   # (latent_dim, n_chunks)
+    vabs = np.abs(heat).max() + 1e-8
+    im   = ax_heat.imshow(heat, aspect='auto', origin='lower',
+                          cmap='RdBu_r', vmin=-vabs, vmax=vabs)
+    ax_heat.set_title('Interpolated latent (dims × chunks)', fontsize=9)
+    ax_heat.set_xlabel('Chunk', fontsize=8)
+    ax_heat.set_ylabel('Latent dim', fontsize=8)
+    ax_heat.tick_params(labelsize=7)
+    plt.colorbar(im, ax=ax_heat, fraction=0.046, pad=0.04)
+
+    fig.tight_layout()
+    return fig
+
+
+# ---------------------------------------------------------------------------
 # Gradio interface
 # ---------------------------------------------------------------------------
 
@@ -139,32 +214,34 @@ def build_interface(model, device):
     def generate(f1, f2, f3, t_val):
         if f1 is None or f2 is None:
             gr.Warning('Please upload at least two audio files.')
-            return None, None
+            return None, None, None
         try:
             z1 = get_latent(f1, 'f1')
             z2 = get_latent(f2, 'f2')
             z3 = get_latent(f3, 'f3') if f3 is not None else None
         except Exception as e:
             gr.Warning(str(e))
-            return None, None
+            return None, None, None
 
         z_chunks = interpolate_chunks(z1, z2, z3, t_val)
         y, spec = decode_to_audio(model, device, z_chunks)
 
         n_files = 3 if z3 is not None else 2
-        if n_files == 2:
-            tick_label = f't={t_val/100:.2f}  (0=File1 · 1=File2)'
-        else:
-            tick_label = f't={t_val/100:.2f}  (0=File1 · 0.5=File2 · 1=File3)'
+        tick_label = (f't={t_val/100:.2f}  (0=File1 · 1=File2)'
+                      if n_files == 2 else
+                      f't={t_val/100:.2f}  (0=File1 · 0.5=File2 · 1=File3)')
 
-        fig, ax = plt.subplots(figsize=(8, 2.5))
+        fig_spec, ax = plt.subplots(figsize=(8, 2.5))
         ax.imshow(spec, aspect='auto', origin='lower', cmap='magma', vmin=-1, vmax=1)
         ax.set_title(f'Decoded mel spectrogram — {tick_label}', fontsize=9)
         ax.set_xlabel('Time frame')
         ax.set_ylabel('Mel bin')
-        plt.tight_layout()
+        fig_spec.tight_layout()
 
-        return (SR, y), fig
+        f_labels = ['File 1', 'File 2', 'File 3'][:n_files]
+        fig_lat  = plot_latent_position(z1, z2, z3, z_chunks, t_val, f_labels)
+
+        return (SR, y), fig_spec, fig_lat
 
     with gr.Blocks(title='SpecVAE — Latent Interpolation') as demo:
         gr.Markdown(
@@ -189,9 +266,11 @@ def build_interface(model, device):
             out_audio = gr.Audio(label='Interpolated audio', type='numpy', autoplay=True)
             out_spec  = gr.Plot(label='Decoded mel spectrogram')
 
+        out_latent = gr.Plot(label='Latent space')
+
         btn.click(fn=generate,
                   inputs=[f1, f2, f3, slider],
-                  outputs=[out_audio, out_spec])
+                  outputs=[out_audio, out_spec, out_latent])
 
     return demo
 
