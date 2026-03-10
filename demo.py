@@ -79,9 +79,7 @@ def slerp(z1, z2, t):
 
 def interpolate_chunks(z1_list, z2_list, z3_list, t_val):
     """
-    Interpolate chunk-by-chunk between two (or three) latent sequences.
-    Files may have different lengths — use the minimum chunk count.
-
+    Per-chunk slerp: interpolate each chunk independently.
     With 2 files:  t=0 → z1,  t=100 → z2
     With 3 files:  t=0 → z1,  t=50  → z2,  t=100 → z3
     """
@@ -95,6 +93,43 @@ def interpolate_chunks(z1_list, z2_list, z3_list, t_val):
     if t <= 0.5:
         return [slerp(z1_list[i], z2_list[i], t * 2) for i in range(n)]
     return [slerp(z2_list[i], z3_list[i], (t - 0.5) * 2) for i in range(n)]
+
+
+def interpolate_chunks_mean_offset(z1_list, z2_list, z3_list, t_val):
+    """
+    Mean + offset interpolation:
+      1. Compute global mean latent per file (mean over chunks) → (latent_dim,)
+      2. Slerp between the global means at position t
+      3. Blend each chunk's per-file offset from its mean: δ[i] = z[i] - μ_global
+      4. Recombine: z_t[i] = μ_t + (1-t)*δ_a[i] + t*δ_b[i]
+
+    This separates global character (morphed via slerp) from local temporal
+    structure (blended linearly), reducing abrupt chunk-to-chunk jumps.
+    """
+    t = torch.tensor(float(t_val) / 100.0, dtype=torch.float32)
+
+    def _mean(z_list):
+        return torch.stack(z_list).mean(dim=0)   # (latent_dim,)
+
+    def _interp(za_list, zb_list, t_scalar):
+        n    = min(len(za_list), len(zb_list))
+        mu_a = _mean(za_list)
+        mu_b = _mean(zb_list)
+        mu_t = slerp(mu_a, mu_b, t_scalar)
+        result = []
+        for i in range(n):
+            delta_a = za_list[i] - mu_a
+            delta_b = zb_list[i] - mu_b
+            delta_t = (1 - t_scalar) * delta_a + t_scalar * delta_b
+            result.append(mu_t + delta_t)
+        return result
+
+    if z3_list is None:
+        return _interp(z1_list, z2_list, t)
+
+    if t <= 0.5:
+        return _interp(z1_list, z2_list, t * 2)
+    return _interp(z2_list, z3_list, (t - 0.5) * 2)
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +246,7 @@ def build_interface(model, device):
             _cache[key + '_z'] = encode_file(model, device, path)
         return _cache[key + '_z']
 
-    def generate(f1, f2, f3, t_val):
+    def generate(f1, f2, f3, t_val, mode):
         if f1 is None or f2 is None:
             gr.Warning('Please upload at least two audio files.')
             return None, None, None
@@ -223,7 +258,9 @@ def build_interface(model, device):
             gr.Warning(str(e))
             return None, None, None
 
-        z_chunks = interpolate_chunks(z1, z2, z3, t_val)
+        interp_fn = (interpolate_chunks_mean_offset
+                     if mode == 'Mean + offset' else interpolate_chunks)
+        z_chunks = interp_fn(z1, z2, z3, t_val)
         y, spec = decode_to_audio(model, device, z_chunks)
 
         n_files = 3 if z3 is not None else 2
@@ -260,6 +297,14 @@ def build_interface(model, device):
             minimum=0, maximum=100, value=0, step=1,
             label='Interpolation  [ 0 = File 1  ·  50 = File 2  ·  100 = File 3 (or File 2) ]')
 
+        mode = gr.Radio(
+            choices=['Per-chunk slerp', 'Mean + offset'],
+            value='Per-chunk slerp',
+            label='Interpolation mode',
+            info='"Per-chunk slerp" morphs each chunk independently. '
+                 '"Mean + offset" slerps the global character while blending '
+                 'each file\'s temporal structure — smoother transitions.')
+
         btn = gr.Button('Generate', variant='primary')
 
         with gr.Row():
@@ -269,7 +314,7 @@ def build_interface(model, device):
         out_latent = gr.Plot(label='Latent space')
 
         btn.click(fn=generate,
-                  inputs=[f1, f2, f3, slider],
+                  inputs=[f1, f2, f3, slider, mode],
                   outputs=[out_audio, out_spec, out_latent])
 
     return demo
