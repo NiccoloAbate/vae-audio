@@ -253,25 +253,145 @@ def plot_kl_per_dim(mu, logvar, out_path):
     print(f'Saved  {out_path}')
 
 
-def save_audio_samples(inputs, recons, labels, filenames, chunk_indices,
-                       sample_indices, out_dir, sr=22050):
-    """Save original and reconstructed chunks as .wav files."""
+def reconstruct_full_file_raw(model, wav_path, device, sr=22050,
+                              chunk_size=16384, crossfade=256):
+    """Load a full wav, split into chunks, VAE encode/decode, concatenate.
+
+    A short linear crossfade is applied at chunk boundaries to reduce clicks.
+    Returns (orig_wave, recon_wave) as float32 numpy arrays, or (None, None)
+    if the file is shorter than one chunk.
+    """
+    import torchaudio
+    y, file_sr = torchaudio.load(wav_path)
+    if file_sr != sr:
+        y = torchaudio.functional.resample(y, file_sr, sr)
+    if y.shape[0] > 1:
+        y = y.mean(0, keepdim=True)
+    y = y.squeeze(0).numpy()   # (T,)
+
+    n_chunks = len(y) // chunk_size
+    if n_chunks == 0:
+        return None, None
+
+    recon_chunks = []
+    model.eval()
+    with torch.no_grad():
+        for i in range(n_chunks):
+            chunk = torch.tensor(y[i * chunk_size:(i + 1) * chunk_size],
+                                 dtype=torch.float32)
+            x     = chunk.unsqueeze(0).unsqueeze(0).to(device)   # (1, 1, T)
+            y_hat, _, _, _ = model(x)
+            recon_chunks.append(y_hat.squeeze(0).squeeze(0).cpu().numpy())
+
+    orig_full = y[:n_chunks * chunk_size]
+
+    # Crossfade at chunk boundaries to suppress clicks
+    if crossfade > 0 and len(recon_chunks) > 1:
+        fade_out = np.linspace(1, 0, crossfade)
+        fade_in  = np.linspace(0, 1, crossfade)
+        result   = recon_chunks[0].copy()
+        for chunk in recon_chunks[1:]:
+            blend  = result[-crossfade:] * fade_out + chunk[:crossfade] * fade_in
+            result = np.concatenate([result[:-crossfade], blend, chunk[crossfade:]])
+        recon_full = result
+    else:
+        recon_full = np.concatenate(recon_chunks)
+
+    return orig_full, recon_full
+
+
+def save_audio_samples(model, dataset, labels, filenames, chunk_indices,
+                       sample_indices, out_dir, device, sr=22050,
+                       chunk_size=16384):
+    """Reconstruct full source files through the VAE and save as .wav pairs."""
     os.makedirs(out_dir, exist_ok=True)
-    for row, i in enumerate(sample_indices):
+
+    # Map basename → full wav path (one entry per unique file)
+    path_map = {}
+    for _, fpath, _ in dataset.items:
+        path_map.setdefault(os.path.basename(fpath), fpath)
+
+    seen, row = set(), 0
+    for i in sample_indices:
+        fname = filenames[i] if i < len(filenames) else None
         lbl   = labels[i]   if i < len(labels)    else 'unk'
-        fname = filenames[i] if i < len(filenames) else 'unk'
-        cidx  = chunk_indices[i] if i < len(chunk_indices) else 0
-        stem  = os.path.splitext(fname)[0]
-        tag   = f'{row:03d}_{lbl}_{stem}_chunk{cidx}'
+        if fname is None or fname in seen:
+            continue
+        seen.add(fname)
 
-        inp = inputs[i].numpy()
-        rec = recons[i].numpy()
+        wav_path = path_map.get(fname)
+        if wav_path is None:
+            print(f'  Warning: could not find wav path for {fname}')
+            continue
+
+        orig, recon = reconstruct_full_file_raw(
+            model, wav_path, device, sr=sr, chunk_size=chunk_size)
+        if orig is None:
+            print(f'  Warning: {fname} too short, skipping')
+            continue
+
+        stem = os.path.splitext(fname)[0]
+        tag  = f'{row:03d}_{lbl}_{stem}'
         sf.write(os.path.join(out_dir, f'{tag}_orig.wav'),
-                 inp / (np.abs(inp).max() + 1e-8), sr)
+                 orig  / (np.abs(orig).max()  + 1e-8), sr)
         sf.write(os.path.join(out_dir, f'{tag}_recon.wav'),
-                 rec / (np.abs(rec).max() + 1e-8), sr)
+                 recon / (np.abs(recon).max() + 1e-8), sr)
+        row += 1
 
-    print(f'Saved  {len(sample_indices)} audio pairs → {out_dir}/')
+    print(f'Saved  {row} full-file audio pairs → {out_dir}/')
+
+
+def plot_full_file_spectrograms(model, dataset, labels, filenames, chunk_indices,
+                                sample_indices, out_dir, device, sr=22050,
+                                chunk_size=16384, n_fft=1024, hop=256):
+    """For each selected file, plot the full-file log-STFT input vs reconstruction."""
+    path_map = {}
+    for _, fpath, _ in dataset.items:
+        path_map.setdefault(os.path.basename(fpath), fpath)
+
+    seen, row = set(), 0
+    for i in sample_indices:
+        fname = filenames[i] if i < len(filenames) else None
+        lbl   = labels[i]   if i < len(labels)    else 'unk'
+        if fname is None or fname in seen:
+            continue
+        seen.add(fname)
+
+        wav_path = path_map.get(fname)
+        if wav_path is None:
+            continue
+
+        orig, recon = reconstruct_full_file_raw(
+            model, wav_path, device, sr=sr, chunk_size=chunk_size)
+        if orig is None:
+            continue
+
+        min_len = min(len(orig), len(recon))
+        S_in  = log_magnitude_stft(orig[:min_len],  n_fft, hop)
+        S_rec = log_magnitude_stft(recon[:min_len], n_fft, hop)
+        diff  = S_in - S_rec
+        vmin  = min(S_in.min(), S_rec.min())
+        vmax  = max(S_in.max(), S_rec.max())
+
+        fig, axes = plt.subplots(1, 3, figsize=(14, 3))
+        for ax, data, title, cmap, v0, v1 in [
+            (axes[0], S_in,  f'Input [{lbl}] {fname}', 'magma', vmin, vmax),
+            (axes[1], S_rec, 'Reconstruction',          'magma', vmin, vmax),
+            (axes[2], diff,  'Difference',     'RdBu_r',
+             -np.abs(diff).max(), np.abs(diff).max()),
+        ]:
+            im = ax.imshow(data, aspect='auto', origin='lower',
+                           cmap=cmap, vmin=v0, vmax=v1)
+            plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            ax.set_title(title, fontsize=8)
+            ax.set_xlabel('Frame'); ax.set_ylabel('Freq bin')
+        fig.tight_layout()
+        out_path = os.path.join(out_dir,
+                                f'{row:03d}_{lbl}_{os.path.splitext(fname)[0]}_fullfile.png')
+        fig.savefig(out_path, dpi=120, bbox_inches='tight')
+        plt.close(fig)
+        print(f'Saved  {out_path}')
+        row += 1
 
 
 # ---------------------------------------------------------------------------
@@ -482,8 +602,14 @@ def main(config, resume, n_samples, out_dir):
 
     plot_kl_per_dim(mu, logvar, os.path.join(out_dir, 'kl_per_dim.png'))
 
-    save_audio_samples(inputs, recons, labels, filenames, chunk_indices,
-                       sample_indices, os.path.join(out_dir, 'audio'), sr=sr)
+    save_audio_samples(model, data_loader.dataset, labels, filenames, chunk_indices,
+                       sample_indices, os.path.join(out_dir, 'audio'), device,
+                       sr=sr, chunk_size=chunk_size)
+
+    print('\nFull-file spectrogram plots…')
+    plot_full_file_spectrograms(model, data_loader.dataset, labels, filenames,
+                                chunk_indices, sample_indices, out_dir, device,
+                                sr=sr, chunk_size=chunk_size)
 
     print('\nLatent space analysis…')
     plot_interpolations(model, data_loader.dataset, filenames, chunk_indices, labels,
