@@ -60,6 +60,7 @@ class BaseTrainer:
         """
         Full training logic
         """
+        not_improved_count = getattr(self, 'not_improved_count', 0)
         for epoch in range(self.start_epoch, self.epochs + 1):
             result = self._train_epoch(epoch)
 
@@ -143,6 +144,7 @@ class BaseTrainer:
             'state_dict': self.model.state_dict(),
             'optimizer': self.optimizer.state_dict(),
             'monitor_best': self.mnt_best,
+            'not_improved_count': not_improved_count,
             'config': self.config
         }
         filename = str(self.checkpoint_dir / 'checkpoint-epoch{}.pth'.format(epoch))
@@ -164,6 +166,7 @@ class BaseTrainer:
         checkpoint = torch.load(resume_path, weights_only=False)
         self.start_epoch = checkpoint['epoch'] + 1
         self.mnt_best = checkpoint['monitor_best']
+        self.not_improved_count = checkpoint.get('not_improved_count', 0)
 
         # load architecture params from checkpoint.
         if checkpoint['config']['arch'] != self.config['arch']:
