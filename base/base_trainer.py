@@ -60,7 +60,8 @@ class BaseTrainer:
         """
         Full training logic
         """
-        not_improved_count = getattr(self, 'not_improved_count', 0)
+        if not hasattr(self, 'not_improved_count'):
+            self.not_improved_count = 0
         for epoch in range(self.start_epoch, self.epochs + 1):
             result = self._train_epoch(epoch)
 
@@ -90,16 +91,16 @@ class BaseTrainer:
                                         "Model performance monitoring is disabled.".format(self.mnt_metric))
                     self.mnt_mode = 'off'
                     improved = False
-                    not_improved_count = 0
+                    self.not_improved_count = 0
 
                 if improved:
                     self.mnt_best = log[self.mnt_metric]
-                    not_improved_count = 0
+                    self.not_improved_count = 0
                     best = True
                 else:
-                    not_improved_count += 1
+                    self.not_improved_count += 1
 
-                if not_improved_count > self.early_stop:
+                if self.not_improved_count > self.early_stop:
                     self.logger.info("Validation performance didn\'t improve for {} epochs. "
                                      "Training stops.".format(self.early_stop))
                     break
@@ -144,7 +145,7 @@ class BaseTrainer:
             'state_dict': self.model.state_dict(),
             'optimizer': self.optimizer.state_dict(),
             'monitor_best': self.mnt_best,
-            'not_improved_count': not_improved_count,
+            'not_improved_count': self.not_improved_count,
             'config': self.config
         }
         filename = str(self.checkpoint_dir / 'checkpoint-epoch{}.pth'.format(epoch))
