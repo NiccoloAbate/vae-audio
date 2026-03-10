@@ -208,6 +208,15 @@ def build_interface(model, device):
                   inputs=[f1, f2, f3, slider],
                   outputs=[out_audio, out_spec])
 
+        demo.load(js="""
+        () => {
+            const observer = new MutationObserver(() => {
+                document.querySelectorAll('audio').forEach(a => { a.loop = true; });
+            });
+            observer.observe(document.body, { childList: true, subtree: true });
+        }
+        """)
+
     return demo
 
 
