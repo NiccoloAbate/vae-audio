@@ -99,6 +99,74 @@ class NsynthSubset(Dataset):
         return idx, self.labels[idx], str(self.path_to_data[idx])
 
 
+class RawAudioDataset(Dataset):
+    """
+    Loads raw audio wav files and serves fixed-length chunks.
+    Expects the same directory structure as CollectData:
+        data_dir/
+            trainingdata/{class}/file.wav
+            testdata/{class}/file.wav
+    """
+    def __init__(self, path_to_dataset, sr=22050, chunk_size=16384,
+                 subset='train', **kwargs):
+        assert isinstance(path_to_dataset, list)
+        assert subset in [None, 'train', 'test']
+
+        split_dirs = []
+        for data_dir in path_to_dataset:
+            if subset == 'train':
+                split_dirs.append(os.path.join(data_dir, 'trainingdata'))
+            elif subset == 'test':
+                split_dirs.append(os.path.join(data_dir, 'testdata'))
+            else:
+                split_dirs.append(os.path.join(data_dir, 'trainingdata'))
+                split_dirs.append(os.path.join(data_dir, 'testdata'))
+
+        items = []   # (label, filepath, chunk_start_sample_resampled)
+        for split_dir in split_dirs:
+            if not os.path.isdir(split_dir):
+                continue
+            for label in sorted(os.listdir(split_dir)):
+                label_dir = os.path.join(split_dir, label)
+                if not os.path.isdir(label_dir):
+                    continue
+                for fname in sorted(os.listdir(label_dir)):
+                    if not fname.lower().endswith('.wav'):
+                        continue
+                    fpath = os.path.join(label_dir, fname)
+                    try:
+                        import soundfile as sf
+                        info = sf.info(fpath)
+                        n_samples = int(info.frames * sr / info.samplerate)
+                        n_chunks  = n_samples // chunk_size
+                        for c in range(n_chunks):
+                            items.append((label, fpath, c * chunk_size))
+                    except Exception:
+                        continue
+
+        self.items      = items
+        self.sr         = sr
+        self.chunk_size = chunk_size
+        self.path_to_data = [it[1] for it in items]
+        self.labels       = [it[0] for it in items]
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, idx):
+        import torchaudio
+        label, path, start = self.items[idx]
+        y, file_sr = torchaudio.load(path)
+        if file_sr != self.sr:
+            y = torchaudio.functional.resample(y, file_sr, self.sr)
+        if y.shape[0] > 1:
+            y = y.mean(0, keepdim=True)
+        end = start + self.chunk_size
+        if end > y.shape[1]:
+            y = torch.nn.functional.pad(y, (0, end - y.shape[1]))
+        return idx, label, y[:, start:end]   # (1, chunk_size)
+
+
 if __name__ == '__main__':
     path_to_data = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'myAudioDataset/audio')
     d = CollectData([path_to_data], subset=None, transform=None)

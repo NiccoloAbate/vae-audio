@@ -143,6 +143,93 @@ class SpecVaeTrainer(BaseTrainer):
         }
 
 
+class RawAudioVaeTrainer(BaseTrainer):
+    """Trainer for RawAudioVAE. Input data is (B, 1, T) waveform chunks."""
+
+    def __init__(self, model, loss, metrics, optimizer, config,
+                 data_loader, valid_data_loader=None, lr_scheduler=None):
+        super().__init__(model, loss, metrics, optimizer, config)
+        self.data_loader       = data_loader
+        self.valid_data_loader = valid_data_loader
+        self.do_validation     = valid_data_loader is not None
+        self.lr_scheduler      = lr_scheduler
+        self.log_step          = int(np.sqrt(data_loader.batch_size))
+        self.beta_max      = 0.1   # final KL weight
+        self.beta_warmup   = 200   # epochs to ramp from 0 → beta_max
+
+    def _beta(self, epoch):
+        """Linear KL warmup: 0 → beta_max over beta_warmup epochs."""
+        return min(epoch / self.beta_warmup, 1.0) * self.beta_max
+
+    def _forward_and_computeLoss(self, x, epoch):
+        y_hat, mu, logvar, z = self.model(x)
+        loss_recon, loss_kl  = self.loss(x, y_hat, mu, logvar)
+        loss = loss_recon + self._beta(epoch) * loss_kl
+        return loss, loss_recon, loss_kl
+
+    def _train_epoch(self, epoch):
+        self.model.train()
+        total_loss, total_recon, total_kl = 0, 0, 0
+
+        for batch_idx, (data_idx, label, data) in enumerate(self.data_loader):
+            x = data.float().to(self.device)
+            self.optimizer.zero_grad()
+            loss, loss_recon, loss_kl = self._forward_and_computeLoss(x, epoch)
+            loss.backward()
+            self.optimizer.step()
+
+            self.writer.set_step((epoch - 1) * len(self.data_loader) + batch_idx)
+            self.writer.add_scalar('loss', loss.item())
+            total_loss  += loss.item()
+            total_recon += loss_recon.item()
+            total_kl    += loss_kl.item()
+
+            if batch_idx % self.log_step == 0:
+                self.logger.debug(
+                    'Train Epoch: {} [{}/{} ({:.0f}%)] Loss: {:.6f}'.format(
+                        epoch,
+                        batch_idx * self.data_loader.batch_size,
+                        self.data_loader.n_samples,
+                        100.0 * batch_idx / len(self.data_loader),
+                        loss.item()))
+
+        log = {
+            'loss':       total_loss  / len(self.data_loader),
+            'loss_recon': total_recon / len(self.data_loader),
+            'loss_kl':    total_kl    / len(self.data_loader),
+            'beta':       self._beta(epoch),
+        }
+        if self.do_validation:
+            log = {**log, **self._valid_epoch(epoch)}
+        if self.lr_scheduler is not None:
+            self.lr_scheduler.step()
+        return log
+
+    def _valid_epoch(self, epoch):
+        self.model.eval()
+        total_val_loss, total_val_recon, total_val_kl = 0, 0, 0
+
+        with torch.no_grad():
+            for batch_idx, (data_idx, label, data) in enumerate(self.valid_data_loader):
+                x    = data.float().to(self.device)
+                loss, loss_recon, loss_kl = self._forward_and_computeLoss(x, epoch)
+                self.writer.set_step(
+                    (epoch - 1) * len(self.valid_data_loader) + batch_idx, 'valid')
+                self.writer.add_scalar('loss', loss.item())
+                total_val_loss  += loss.item()
+                total_val_recon += loss_recon.item()
+                total_val_kl    += loss_kl.item()
+
+        for name, p in self.model.named_parameters():
+            self.writer.add_histogram(name, p, bins='auto')
+
+        return {
+            'val_loss':       total_val_loss  / len(self.valid_data_loader),
+            'val_loss_recon': total_val_recon / len(self.valid_data_loader),
+            'val_loss_kl':    total_val_kl    / len(self.valid_data_loader),
+        }
+
+
 class GMVAETrainer(BaseTrainer):
     """
     Trainer class

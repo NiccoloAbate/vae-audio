@@ -2,6 +2,7 @@ from torch.utils.data import Dataset
 from torchvision import datasets, transforms
 from base import BaseDataLoader
 from dataset import transformers, CollectData, NsynthSubset
+from dataset.datasets import RawAudioDataset
 
 
 class MnistDataLoader(BaseDataLoader):
@@ -38,6 +39,16 @@ class CollectDataLoader(BaseDataLoader):
         self.data_dir = data_dir
         self.dataset = CollectData(self.data_dir, transform=self.transform, **kwargs)
         super(CollectDataLoader, self).__init__(self.dataset, batch_size, shuffle, validation_split, num_workers)
+
+
+class RawAudioDataLoader(BaseDataLoader):
+    """DataLoader for raw-waveform chunks (used by RawAudioVAE)."""
+    def __init__(self, data_dir, sr=22050, chunk_size=16384,
+                 batch_size=16, shuffle=True, validation_split=0.1,
+                 num_workers=0, **kwargs):
+        self.dataset = RawAudioDataset(
+            path_to_dataset=data_dir, sr=sr, chunk_size=chunk_size, **kwargs)
+        super().__init__(self.dataset, batch_size, shuffle, validation_split, num_workers)
 
 
 class NsynthSubsetLoader(BaseDataLoader):

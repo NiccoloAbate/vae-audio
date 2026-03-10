@@ -4,6 +4,51 @@ import torch.nn.functional as F
 from base import approx_qy_x
 
 
+def multi_res_stft_loss(y, y_hat,
+                        fft_sizes=(2048, 1024, 512, 256),
+                        hop_sizes=(512,  256,  128,  64)):
+    """
+    Multi-resolution STFT loss (spectral convergence + log magnitude L1).
+    y, y_hat : (B, 1, T) waveforms — kept on the original device for gradient flow.
+    """
+    device = y.device
+    y     = y.squeeze(1).float()
+    y_hat = y_hat.squeeze(1).float()
+
+    total = torch.zeros(1, device=device)
+    for n_fft, hop in zip(fft_sizes, hop_sizes):
+        win = torch.hann_window(n_fft, device=device)
+        Y    = torch.stft(y,     n_fft, hop, n_fft, win, return_complex=True)
+        Yh   = torch.stft(y_hat, n_fft, hop, n_fft, win, return_complex=True)
+        Y_m  = Y.abs()
+        Yh_m = Yh.abs()
+        # spectral convergence
+        sc   = (Y_m - Yh_m).norm() / (Y_m.norm() + 1e-8)
+        # log magnitude L1
+        log  = F.l1_loss(torch.log(Y_m + 1e-5), torch.log(Yh_m + 1e-5))
+        total = total + sc + log
+
+    return total / len(fft_sizes)
+
+
+def kld_temporal(mu, logvar, free_bits=1.0):
+    """KL divergence for temporal latents (B, D, T): sum over D,T; mean over B.
+
+    free_bits: minimum KL per latent dimension (averaged over time).
+    Dimensions below this threshold are not penalized, preventing posterior collapse.
+    """
+    kl = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())  # (B, D, T)
+    if free_bits > 0:
+        kl_per_dim = kl.mean(dim=2).clamp(min=free_bits)  # (B, D)
+        return kl_per_dim.sum(dim=1).mean()
+    return kl.sum(dim=(1, 2)).mean()
+
+
+def raw_audio_vae_loss(y, y_hat, mu, logvar, free_bits=1.0):
+    """Combined loss for RawAudioVAE: returns (recon_loss, kl_loss)."""
+    return multi_res_stft_loss(y, y_hat), kld_temporal(mu, logvar, free_bits)
+
+
 def vae_loss(q_mu, q_logvar, output, target):
     return mse_loss(output, target), kld_gauss(q_mu, q_logvar)
 

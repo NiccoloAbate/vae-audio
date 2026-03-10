@@ -5,6 +5,119 @@ import torch.nn.functional as F
 from base import BaseModel, BaseVAE, BaseGMVAE
 
 
+# ---------------------------------------------------------------------------
+# Raw Audio VAE
+# ---------------------------------------------------------------------------
+
+class ResidualBlock(nn.Module):
+    """Dilated residual conv block: x → LeakyReLU → dilated conv → LeakyReLU → 1x1 conv → + x"""
+    def __init__(self, channels, dilation=1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(channels, channels, 3, dilation=dilation, padding=dilation),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(channels, channels, 1),
+        )
+
+    def forward(self, x):
+        return x + self.net(x)
+
+
+class ResidualStack(nn.Module):
+    """Stack of residual blocks with exponentially growing dilations [1, 3, 9]."""
+    def __init__(self, channels, n_layers=3):
+        super().__init__()
+        self.blocks = nn.ModuleList(
+            [ResidualBlock(channels, 3 ** i) for i in range(n_layers)])
+
+    def forward(self, x):
+        for block in self.blocks:
+            x = block(x)
+        return x
+
+
+class EncoderBlock(nn.Module):
+    """Strided Conv1d downsampling + residual stack."""
+    def __init__(self, in_ch, out_ch, stride):
+        super().__init__()
+        self.conv = nn.Conv1d(in_ch, out_ch, kernel_size=2 * stride,
+                              stride=stride, padding=stride // 2)
+        self.res = ResidualStack(out_ch)
+        self.act = nn.LeakyReLU(0.2)
+
+    def forward(self, x):
+        return self.res(self.conv(self.act(x)))
+
+
+class DecoderBlock(nn.Module):
+    """Strided ConvTranspose1d upsampling + residual stack."""
+    def __init__(self, in_ch, out_ch, stride):
+        super().__init__()
+        self.conv = nn.ConvTranspose1d(in_ch, out_ch, kernel_size=2 * stride,
+                                       stride=stride, padding=stride // 2)
+        self.res = ResidualStack(out_ch)
+        self.act = nn.LeakyReLU(0.2)
+
+    def forward(self, x):
+        return self.res(self.conv(self.act(x)))
+
+
+class RawAudioVAE(nn.Module):
+    """
+    Raw-waveform VAE with a temporal latent space.
+
+    Encoder downsamples (B, 1, T) → (B, latent_dim, T//total_stride).
+    Decoder upsamples (B, latent_dim, T//total_stride) → (B, 1, T).
+    Total downsampling = product(strides).
+
+    With default strides=[4,4,4,4] and chunk_size=16384:
+      latent frames = 16384 / 256 = 64  (at 22050 Hz → ~86 Hz latent rate)
+    """
+    def __init__(self, latent_dim=64,
+                 channels=(32, 64, 128, 256, 512),
+                 strides=(4, 4, 4, 4)):
+        super().__init__()
+        channels = list(channels)
+        strides  = list(strides)
+        assert len(channels) == len(strides) + 1
+
+        self.latent_dim = latent_dim
+
+        # Encoder
+        enc = [nn.Conv1d(1, channels[0], 7, padding=3)]
+        for i, s in enumerate(strides):
+            enc.append(EncoderBlock(channels[i], channels[i + 1], s))
+        self.encoder      = nn.Sequential(*enc)
+        self.mu_proj      = nn.Conv1d(channels[-1], latent_dim, 1)
+        self.logvar_proj  = nn.Conv1d(channels[-1], latent_dim, 1)
+
+        # Decoder
+        dec_ch = list(reversed(channels))
+        dec = [nn.Conv1d(latent_dim, dec_ch[0], 1)]
+        for i, s in enumerate(reversed(strides)):
+            dec.append(DecoderBlock(dec_ch[i], dec_ch[i + 1], s))
+        dec += [nn.LeakyReLU(0.2),
+                nn.Conv1d(dec_ch[-1], 1, 7, padding=3),
+                nn.Tanh()]
+        self.decoder = nn.Sequential(*dec)
+
+    def encode(self, x):
+        h      = self.encoder(x)                             # (B, C, T_lat)
+        mu     = self.mu_proj(h)                             # (B, D, T_lat)
+        logvar = self.logvar_proj(h)
+        z      = mu + torch.randn_like(mu) * (0.5 * logvar).exp()
+        return mu, logvar, z
+
+    def decode(self, z):
+        return self.decoder(z)                               # (B, 1, T)
+
+    def forward(self, x):
+        mu, logvar, z = self.encode(x)
+        y_hat = self.decode(z)
+        return y_hat, mu, logvar, z
+
+
 def spec_conv1d(n_layer=3, n_channel=[64, 32, 16, 8], filter_size=[1, 3, 3], stride=[1, 2, 2]):
     """
     Construction of conv. layers. Note the current implementation always effectively turn to 1-D conv,
