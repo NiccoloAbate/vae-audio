@@ -50,7 +50,7 @@
 
 % Compact title area
 \definetitlestyle{CompactStanford}{
-    width=600mm, roundedcorners=20, linewidth=0.3cm, innersep=0.8cm,
+    width=880mm, roundedcorners=20, linewidth=0.3cm, innersep=0.8cm,
     titletotopverticalspace=4mm, titletoblockverticalspace=6mm,
     titlegraphictotitledistance=10pt, titletextscale=1
 }{
@@ -61,9 +61,14 @@
 }
 \usetitlestyle{CompactStanford}
 
-% Reduce space between blocks
+% Remove TikZposter watermark
+\tikzposterlatexaffectionproofoff
+
+% Reduce margins and block spacing
 \makeatletter
 \TP@blockverticalspace=6mm
+\setlength{\TP@visibletextwidth}{\paperwidth-2cm}
+\setlength{\TP@visibletextheight}{\paperheight-6cm}
 \makeatother
 
 % ── Metadata ────────────────────────────────────────────
