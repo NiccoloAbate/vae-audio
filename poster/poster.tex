@@ -97,18 +97,18 @@
     but high-quality waveform reconstruction remains hard.
 
     \medskip
-    \vspace{5mm}
+    \vspace{4mm}
     \textbf{Key Question:} What is the minimal VAE architecture that yields
     convincing audio and a musically useful latent space?
 
     \medskip
-    \vspace{5mm}
+    \vspace{4mm}
     \textbf{Creative Potential:}
     The latent space as a synthesis interface - morph between sounds
     in a learned latent space.
 
     \medskip
-    \vspace{5mm}
+    \vspace{4mm}
     \textbf{Progression:}
     \begin{itemize}[leftmargin=1em, noitemsep, topsep=1pt]
         \item \textbf{SpecVAE} - spectrogram-domain baseline, 29 files
@@ -138,18 +138,19 @@
 % ── 7. Interpolation ────────────────────────────────────
 \block{7.~Latent Space Interpolation}{
     \begin{center}
+        \vspace{-6mm}
         \includegraphics[width=0.95\linewidth]{rawvae_small/interp_edit.png}
+        \vspace{-6mm}
     \end{center}
 
     \medskip
-    \textbf{Slerp} between two files' temporal latent sequences
-    ($t = 0, 0.25, 0.5, 0.75, 1.0$).
-    Each column is a decoded spectrogram at interpolation step $t$.
+    \textbf{Slerp} (spherical linear interpolation) from $t{=}0$ to $t{=}1$ between two files' latent sequences.
+    Spectrograms evolve smoothly, indicating perceptual coherence in the learned latent space.
 
     \medskip
-    \textcolor{accentblue}{\textbf{Mean + offset mode:}} slerp global character
-    ($\mu_{\text{global}}$) while blending per-chunk offsets
-    $\delta_i = z_i - \mu$ --- smoother transitions, fewer abrupt jumps.
+    \vspace{2mm}
+    \textbf{Mean + offset:} decomposes $z_i = \mu_{\text{global}} + \delta_i$;
+    slerp the mean, lerp the offsets - separating timbral character from temporal structure.
 }
 
 
@@ -166,7 +167,7 @@
     \begin{itemize}[leftmargin=1em, noitemsep, topsep=1pt]
         \item \textbf{Input:} log-mel spectrogram (64\,bins $\times$ T\,frames)
         \item \textbf{Encoder:} Conv1d stack $\to$ FC $\to$ $\mu, \sigma$
-        \item \textbf{Latent:} $z \in \mathbb{R}^{32}$ per chunk (single vector)
+        \item \textbf{Latent:} $z \in \mathbb{R}^{32}$ per 500\,ms single-vector chunk
         \item \textbf{Decoder:} FC $\to$ Conv1d $\to$ spec $\to$ Griffin-Lim
         \item \textbf{Loss:} MSE on mel spectrogram + $\beta$-KL
     \end{itemize}
@@ -185,9 +186,7 @@
     \end{multicols}
 
     \medskip
-    RawAudioVAE uses a \textbf{temporal latent space} -
-    each latent frame $\approx 11.6$\,ms of audio, preserving finer temporal structure
-    than SpecVAE's single-vector latent can represent. Free bits ($\lambda = 0.25$) prevent posterior collapse.
+    RawAudioVAE's \textbf{temporal latent} (64 frames, $\approx$86\,Hz) preserves within-chunk dynamics lost by SpecVAE's single vector. Free bits ($\lambda = 0.25$) prevent posterior collapse.
 }
 
 % ── 5. Reconstruction Quality ───────────────────────────
@@ -215,12 +214,12 @@
 
 % ── 8. Demo ─────────────────────────────────────────────
 \block{8.~Interactive Demo}{
-    \begin{minipage}[c]{0.64\linewidth}
-        Upload \textbf{2--3 audio files}, drag the slider to morph between them
-        in latent space using slerp.
+    \begin{minipage}[c]{0.6\linewidth}
+        Upload \textbf{2--3 audio files} and reconstruct them in the learned latent space.
+        Drag the slider to morph between them in latent space using slerp.
 
         \medskip
-        \textbf{Outputs:} decoded audio $\cdot$ STFT spectrogram $\cdot$ latent PCA scatter.
+        \textbf{Outputs:} decoded audio $|$ STFT spectrogram $|$ latent analysis.
 
         \medskip
         \textbf{Modes:} per-chunk slerp or mean\,+\,offset.
@@ -229,6 +228,7 @@
         \textcolor{subtletxt}{\small To run locally:}
         {\small\texttt{python demo\_raw.py}
         \texttt{\quad -r <checkpoint>.pth}}
+        \vspace{-4mm}
     \end{minipage}
     \hfill
     \begin{minipage}[c]{0.36\linewidth}
@@ -250,19 +250,18 @@
     \setlength{\tabcolsep}{3pt}
     \centering
     \footnotesize
-    \begin{tabular}{l c c c}
+    \begin{tabular}{l c c c c}
         \toprule
-        & \textbf{SpecVAE} & \textbf{Raw (small)} & \textbf{Raw (ESC-50)} \\
+        & \textbf{SpecVAE} & \textbf{Raw (small)} & \textbf{Raw (ESC-50)} & \textbf{Raw (Medley)} \\
         \midrule
-        Dataset   & Small & Small & ESC-50 \\
-        Files     & 29      & 29      & 2{,}000 \\
-        Classes   & 2       & 2       & 50 \\
-        % Chunks    & 165     & 165     & 9{,}600 \\
-        Latent    & $\mathbb{R}^{32}$ & $32{\times}64$ & $32{\times}64$ \\
-        Loss      & MSE mel & MR-STFT & MR-STFT \\
-        $\beta$ warmup & --- & $0{\to}0.05$ & $0{\to}0.05$ \\
-        Free bits & ---     & $\lambda{=}0.25$ & $\lambda{=}0.25$ \\
-        Best val  & ---     & 1.497 (675) & 1.244 (350) \\
+        Dataset   & Small   & Small   & ESC-50  & Medley-solos \\
+        Files     & 29      & 29      & 2{,}000 & 21{,}571 \\
+        Classes   & 2       & 2       & 50      & 8 \\
+        Latent    & $\mathbb{R}^{32}$ & $32{\times}64$ & $32{\times}64$ & $32{\times}64$ \\
+        Loss      & MSE mel & MR-STFT & MR-STFT & MR-STFT \\
+        $\beta$ warmup & --- & $0{\to}0.05$ & $0{\to}0.05$ & $0{\to}0.05$ \\
+        Free bits & ---     & $\lambda{=}0.25$ & $\lambda{=}0.25$ & $\lambda{=}0.25$ \\
+        Best val  & ---     & 1.497 (675) & 1.244 (350) & \textit{TBD} \\
         \bottomrule
     \end{tabular}
     \par\vspace{-2mm}
