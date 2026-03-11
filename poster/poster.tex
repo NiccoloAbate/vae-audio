@@ -50,8 +50,8 @@
 
 % Compact title area
 \definetitlestyle{CompactStanford}{
-    width=880mm, roundedcorners=20, linewidth=0.3cm, innersep=0.8cm,
-    titletotopverticalspace=4mm, titletoblockverticalspace=6mm,
+    width=880mm, roundedcorners=20, linewidth=0.3cm, innersep=0.4cm,
+    titletotopverticalspace=2mm, titletoblockverticalspace=4mm,
     titlegraphictotitledistance=10pt, titletextscale=1
 }{
     \begin{scope}[line width=\titlelinewidth, rounded corners=\titleroundedcorners]
@@ -66,7 +66,7 @@
 
 % Reduce margins and block spacing
 \makeatletter
-\TP@blockverticalspace=4mm
+\TP@blockverticalspace=3mm
 \setlength{\TP@visibletextwidth}{\paperwidth-2cm}
 \setlength{\TP@visibletextheight}{\paperheight-6cm}
 \makeatother
@@ -116,17 +116,19 @@
 
 % ── 4. Loss Curves ──────────────────────────────────────
 \block{4.~Training Loss Curves}{
-    \begin{center}
-        \includegraphics[width=0.95\linewidth]{rawvae_small/training_curves.png}
+    \vspace{-4mm}
+    \centering
+        \includegraphics[width=0.95\linewidth]{rawvae_small/training_curves.png}\\[-5mm]
         \vspace{1mm}
 
         {\small\textcolor{subtletxt}{RawAudioVAE (small dataset, 1000 epochs)}}
         \vspace{3mm}
-    \end{center}
+    \par
 
     \medskip
     \textcolor{accentblue}{\textbf{Key:}} $\beta$ warmup (0 $\to$ 0.05 over 100 ep)
     prevents posterior collapse while maintaining reconstruction quality.
+    (Not Pictured...)
     %ESC-50 run (not shown) beats small-dataset best in $<$150 epochs.
 }
 
@@ -162,7 +164,7 @@
         \item \textbf{Input:} log-mel spectrogram (64\,bins $\times$ T\,frames)
         \item \textbf{Encoder:} Conv1d stack $\to$ FC $\to$ $\mu, \sigma$
         \item \textbf{Latent:} $z \in \mathbb{R}^{32}$ per chunk (single vector)
-        \item \textbf{Decoder:} FC $\to$ DeConv1d $\to$ spectrogram $\to$ Griffin-Lim
+        \item \textbf{Decoder:} FC $\to$ Conv1d $\to$ spec $\to$ Griffin-Lim
         \item \textbf{Loss:} MSE on mel spectrogram + $\beta$-KL
     \end{itemize}
 
@@ -187,39 +189,48 @@
 
 % ── 5. Reconstruction Quality ───────────────────────────
 \block{5.~Reconstruction Quality}{
-    \begin{center}
+    \vspace{-3mm}
+    \centering
     \begin{minipage}{0.48\linewidth}
         \centering
-        \includegraphics[width=\linewidth]{specvae/spectrograms_edit.png}\\
+        \includegraphics[width=\linewidth]{specvae/spectrograms_edit.png}\\[-3mm]
         {\small\textcolor{subtletxt}{\textbf{SpecVAE} (Small)}}
     \end{minipage}\hfill
     \begin{minipage}{0.48\linewidth}
         \centering
-        \includegraphics[width=\linewidth]{rawvae_small/spectrograms_edit.png}\\
+        \includegraphics[width=\linewidth]{rawvae_small/spectrograms_edit.png}\\[-3mm]
         {\small\textcolor{subtletxt}{\textbf{RawAudioVAE} (Small)}}
     \end{minipage}
-    \end{center}
+    \par
 
     \medskip
-    Each panel: \textbf{Original} (top) $\vert$ \textbf{Reconstructed} (middle).
+    \justifying
+    % Each panel: \textbf{Original} (top) $\vert$ \textbf{Reconstructed} (middle).
     The RawAudioVAE creates better reconstructions, especially where tonal audio is present.
 }
 
 % ── 8. Demo ─────────────────────────────────────────────
 \block{8.~Interactive Demo}{
-    \begin{center}
-        \textit{[Demo screenshot --- poster/demo\_screenshot.png]}
-        \vspace{2mm}
+    \begin{minipage}[c]{0.7\linewidth}
+        Upload \textbf{2--3 audio files}, drag the slider to morph between them
+        in latent space using slerp.
 
-        {\small Upload any audio file, drag the slider to morph between two sounds
-        in latent space. Outputs decoded audio + STFT spectrogram + latent PCA scatter.}
+        \medskip
+        \textbf{Outputs:} decoded audio $\cdot$ STFT spectrogram $\cdot$ latent PCA scatter.
 
-        \vspace{3mm}
-        \texttt{python demo\_raw.py -r saved/models/RawAudioVAE/<run>/model\_best.pth}
+        \medskip
+        \textbf{Modes:} per-chunk slerp or mean\,+\,offset.
 
-        \vspace{3mm}
-        \textit{[QR code to GitHub / demo]}
-    \end{center}
+        \medskip
+        \textcolor{subtletxt}{\small To run locally:}
+        {\footnotesize\texttt{python demo\_raw.py}
+        \texttt{\quad -r <checkpoint>.pth}}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[c]{0.3\linewidth}
+        \vspace*{-2mm}
+        \includegraphics[width=\linewidth]{demo.png}
+    \end{minipage}
 }
 
 
@@ -230,15 +241,16 @@
 
 % ── 3. Training Setup ───────────────────────────────────
 \block{3.~Training Setup}{
-    \renewcommand{\arraystretch}{1.2}
+    \vspace{-2mm}
+    \renewcommand{\arraystretch}{1.1}
     \setlength{\tabcolsep}{3pt}
-    \begin{center}
+    \centering
     \footnotesize
     \begin{tabular}{l c c c}
         \toprule
         & \textbf{SpecVAE} & \textbf{Raw (small)} & \textbf{Raw (ESC-50)} \\
         \midrule
-        Dataset   & myAudio & myAudio & ESC-50 \\
+        Dataset   & Small & Small & ESC-50 \\
         Files     & 29      & 29      & 2{,}000 \\
         Classes   & 2       & 2       & 50 \\
         Chunks    & 165     & 165     & 9{,}600 \\
@@ -249,23 +261,20 @@
         Best val  & ---     & 1.497 (675) & 1.355 (143+) \\
         \bottomrule
     \end{tabular}
-    \end{center}
-
-    \medskip
-    Free bits enforce min KL per dim.
-    ESC-50 beats the 1000-epoch small-data run in $<$150 epochs.
+    \par\vspace{1mm}
+    % Free bits enforce min KL per dim.
+    % ESC-50 beats the 1000-epoch small-data run in $<$150 epochs.
 }
 
 % ── 6. Latent Space Structure ───────────────────────────
 \block{6.~Latent Space Structure}{
     \begin{center}
-        \includegraphics[width=0.95\linewidth]{rawvae_esc50/kl_per_dim.png}
+        \includegraphics[width=0.82\linewidth]{rawvae_esc50/kl_per_dim.png}\\[-3mm]
         {\small\textcolor{subtletxt}{KL per latent dim (ESC-50)}}
-        \vspace{0mm}
+        \vspace{3mm}
 
-        \includegraphics[width=0.95\linewidth]{rawvae_esc50/latent_pca.png}
+        \includegraphics[width=0.82\linewidth]{rawvae_esc50/latent_pca.png}\\[-7mm]
         {\small\textcolor{subtletxt}{Latent PCA scatter (colour = class, unsupervised)}}
-        \vspace{0mm}
     \end{center}
 
     \medskip
