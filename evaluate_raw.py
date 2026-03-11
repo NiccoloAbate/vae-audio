@@ -17,6 +17,7 @@ Usage:
 
 import argparse
 import os
+import random
 import numpy as np
 import torch
 import matplotlib
@@ -59,12 +60,17 @@ def load_model_and_data(config, resume, device):
 # data collection
 # ---------------------------------------------------------------------------
 
-def collect_latents_and_recons(model, data_loader, device, max_samples=500):
+def collect_latents_and_recons(model, data_loader, device, max_per_class=64, seed=0):
     """Run the test set through the model. Returns per-chunk arrays.
+
+    Stratified sampling: collects up to max_per_class chunks per class,
+    guaranteeing all classes are represented regardless of directory order.
+    Deterministic via fixed seed.
 
     mu / logvar are pooled over the temporal axis (mean over T_lat) to give
     a single D-dim vector per chunk, suitable for PCA and KL-per-dim plots.
     """
+    # Collect everything first, then stratified-subsample
     mu_list, logvar_list = [], []
     inp_list, rec_list   = [], []
     labels_out, fnames_out, cidx_out = [], [], []
@@ -73,27 +79,44 @@ def collect_latents_and_recons(model, data_loader, device, max_samples=500):
 
     with torch.no_grad():
         for data_idx, label, data in data_loader:
-            x = data.float().to(device)            # (B, 1, T)
-            y_hat, mu, logvar, _ = model(x)        # mu: (B, D, T_lat)
+            x = data.float().to(device)
+            y_hat, mu, logvar, _ = model(x)
 
-            mu_list.append(mu.mean(dim=2).cpu())      # (B, D)
+            mu_list.append(mu.mean(dim=2).cpu())
             logvar_list.append(logvar.mean(dim=2).cpu())
-            inp_list.append(x.squeeze(1).cpu())       # (B, T)
+            inp_list.append(x.squeeze(1).cpu())
             rec_list.append(y_hat.squeeze(1).cpu())
 
-            labels = list(label)
-            for b, (idx, lbl) in enumerate(zip(data_idx.tolist(), labels)):
+            for b, (idx, lbl) in enumerate(zip(data_idx.tolist(), list(label))):
                 _, fpath, chunk_start = dataset.items[idx]
                 fnames_out.append(os.path.basename(fpath))
                 cidx_out.append(chunk_start // dataset.chunk_size)
                 labels_out.append(lbl)
 
-            if sum(t.size(0) for t in inp_list) >= max_samples:
-                break
+    mu_all      = torch.cat(mu_list)
+    logvar_all  = torch.cat(logvar_list)
+    inp_all     = torch.cat(inp_list)
+    rec_all     = torch.cat(rec_list)
 
-    return (torch.cat(mu_list), torch.cat(logvar_list),
-            torch.cat(inp_list), torch.cat(rec_list),
-            labels_out, fnames_out, cidx_out)
+    # Stratified subsample
+    rng = random.Random(seed)
+    by_class = {}
+    for i, lbl in enumerate(labels_out):
+        by_class.setdefault(lbl, []).append(i)
+    keep = []
+    for lbl, idxs in sorted(by_class.items()):
+        keep += rng.sample(idxs, min(max_per_class, len(idxs)))
+    keep.sort()
+
+    print(f"  {len(inp_all)} chunks from {len(set(fnames_out))} files collected")
+    print(f"  Stratified: {len(keep)} chunks kept ({len(by_class)} classes, "
+          f"up to {max_per_class} each)")
+
+    return (mu_all[keep], logvar_all[keep],
+            inp_all[keep], rec_all[keep],
+            [labels_out[i] for i in keep],
+            [fnames_out[i] for i in keep],
+            [cidx_out[i]   for i in keep])
 
 
 def select_sample_indices(filenames, chunk_indices, n_samples, labels=None):
