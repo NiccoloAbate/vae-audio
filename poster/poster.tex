@@ -1,0 +1,312 @@
+\documentclass[20pt]{tikzposter}
+\geometry{paperwidth=36in, paperheight=24in}
+
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath, amssymb}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{multicol}
+
+% ── Stanford Colors ─────────────────────────────────────
+\definecolor{cardinal}{HTML}{8C1515}
+\definecolor{cardinallight}{HTML}{B83A4B}
+\definecolor{stanfordwhite}{HTML}{FFFFFF}
+\definecolor{stanfordbg}{HTML}{F4F4F4}
+\definecolor{stanfordgray}{HTML}{4D4F53}
+\definecolor{accent}{HTML}{8C1515}
+\definecolor{accentblue}{HTML}{006CB8}
+\definecolor{accentorange}{HTML}{E98300}
+\definecolor{subtletxt}{HTML}{666666}
+
+\definecolorstyle{Stanford}{
+    \definecolor{colorOne}{named}{cardinal}
+    \definecolor{colorTwo}{named}{stanfordbg}
+    \definecolor{colorThree}{named}{stanfordgray}
+}{
+    % Background
+    \colorlet{backgroundcolor}{stanfordbg}
+    \colorlet{framecolor}{cardinal}
+    % Title
+    \colorlet{titlebgcolor}{cardinal}
+    \colorlet{titlefgcolor}{stanfordwhite}
+    % Block
+    \colorlet{blocktitlebgcolor}{stanfordbg}
+    \colorlet{blocktitlefgcolor}{cardinal}
+    \colorlet{blockbodybgcolor}{stanfordwhite}
+    \colorlet{blockbodyfgcolor}{stanfordgray}
+    % Innerblock
+    \colorlet{innerblocktitlebgcolor}{stanfordbg}
+    \colorlet{innerblocktitlefgcolor}{stanfordgray}
+    \colorlet{innerblockbodybgcolor}{stanfordbg}
+    \colorlet{innerblockbodyfgcolor}{stanfordgray}
+}
+
+\usetheme{Default}
+\usecolorstyle{Stanford}
+\useblockstyle{Default}
+
+% Compact title area
+\definetitlestyle{CompactStanford}{
+    width=600mm, roundedcorners=20, linewidth=0.3cm, innersep=0.8cm,
+    titletotopverticalspace=4mm, titletoblockverticalspace=6mm,
+    titlegraphictotitledistance=10pt, titletextscale=1
+}{
+    \begin{scope}[line width=\titlelinewidth, rounded corners=\titleroundedcorners]
+        \draw[color=framecolor, fill=titlebgcolor]%
+        (\titleposleft,\titleposbottom) rectangle (\titleposright,\titlepostop);
+    \end{scope}
+}
+\usetitlestyle{CompactStanford}
+
+% Reduce space between blocks
+\makeatletter
+\TP@blockverticalspace=6mm
+\makeatother
+
+% ── Metadata ────────────────────────────────────────────
+\title{\parbox{0.9\linewidth}{\centering
+    Exploring Variational Autoencoders for Audio Synthesis and Timbre Transfer
+}}
+\author{Niccolo Abate \quad\textbar\quad EE\,269 --- CCRMA, Stanford University \quad\textbar\quad March 2026}
+\institute{}
+\date{}
+
+% ══════════════════════════════════════════════════════════
+\begin{document}
+\maketitle
+
+\begin{columns}
+
+% ╔══════════════════════════════════╗
+% ║  LEFT COLUMN  (0.25)            ║
+% ╚══════════════════════════════════╝
+\column{0.25}
+
+% ── 1. Motivation ───────────────────────────────────────
+\block{1.~Motivation}{
+    \textbf{Variational Autoencoders} learn compact latent representations
+    enabling reconstruction, synthesis, and \emph{morphing} between sounds ---
+    but high-quality waveform decoding remains hard.
+
+    \medskip
+    \textbf{Key question:} What is the minimal VAE architecture that yields
+    convincing audio \emph{and} a musically useful latent space?
+
+    \medskip
+    \textcolor{accentblue}{\textbf{Creative potential:}}
+    The latent space as a synthesis interface --- drag a slider to
+    continuously morph between any two sounds.
+
+    \medskip
+    \textbf{Progression:}
+    \begin{itemize}[leftmargin=1.2em, itemsep=2pt]
+        \item \textbf{SpecVAE} --- spectrogram-domain baseline
+        \item \textbf{RawAudioVAE (small)} --- raw waveform, 29 files
+        \item \textbf{RawAudioVAE (ESC-50)} --- scale to 2000 clips, 50 classes
+    \end{itemize}
+}
+
+% ── 4. Loss Curves ──────────────────────────────────────
+\block{4.~Training Loss Curves}{
+    \begin{center}
+        \includegraphics[width=0.95\linewidth]{rawvae_small/training_curves.png}
+        \vspace{1mm}
+
+        {\small\textcolor{subtletxt}{RawAudioVAE (small dataset, 1000 epochs)}}
+        \vspace{3mm}
+
+        \includegraphics[width=0.95\linewidth]{specvae/training_curves.png}
+
+        {\small\textcolor{subtletxt}{SpecVAE (myAudioDataset, 232 epochs)}}
+    \end{center}
+
+    \medskip
+    \textcolor{accentblue}{\textbf{Key:}} $\beta$ warmup (0 $\to$ 0.05 over 100 ep)
+    prevents posterior collapse while maintaining reconstruction quality.
+    ESC-50 run (not shown) beats small-dataset best in $<$150 epochs.
+}
+
+% ── 7. Interpolation ────────────────────────────────────
+\block{7.~Latent Space Interpolation}{
+    \begin{center}
+        \includegraphics[width=0.95\linewidth]{rawvae_small/interp_00_00eac343_to_00ae03f6_grid.png}
+    \end{center}
+
+    \medskip
+    \textbf{Slerp} between two files' temporal latent sequences
+    ($t = 0, 0.25, 0.5, 0.75, 1.0$).
+    Each column is a decoded spectrogram at interpolation step $t$.
+
+    \medskip
+    \textcolor{accentblue}{\textbf{Mean + offset mode:}} slerp global character
+    ($\mu_{\text{global}}$) while blending per-chunk offsets
+    $\delta_i = z_i - \mu$ --- smoother transitions, fewer abrupt jumps.
+}
+
+
+% ╔══════════════════════════════════╗
+% ║  CENTER COLUMN  (0.50)          ║
+% ╚══════════════════════════════════╝
+\column{0.50}
+
+% ── 2. Architecture Overview ────────────────────────────
+\block{2.~Architecture Overview}{
+    \begin{multicols}{2}
+
+    \textcolor{accentblue}{\textbf{SpecVAE}}
+    \begin{itemize}[leftmargin=1em, itemsep=1pt]
+        \item \textbf{Input:} log-mel spectrogram (64\,bins $\times$ T\,frames)
+        \item \textbf{Encoder:} Conv1d stack $\to$ FC $\to$ $\mu, \sigma$
+        \item \textbf{Latent:} $z \in \mathbb{R}^{32}$ per chunk (single vector)
+        \item \textbf{Decoder:} FC $\to$ DeConv1d $\to$ spectrogram $\to$ Griffin-Lim
+        \item \textbf{Loss:} MSE on mel spectrogram + $\beta$-KL
+    \end{itemize}
+
+    \columnbreak
+
+    \textcolor{accentorange}{\textbf{RawAudioVAE}}
+    \begin{itemize}[leftmargin=1em, itemsep=1pt]
+        \item \textbf{Input:} raw waveform ($1 \times 16{,}384$ samples @ 22\,kHz)
+        \item \textbf{Encoder:} strided Conv1d ($\times$4, stride 4) + dilated residual
+        \item \textbf{Latent:} $z \in \mathbb{R}^{32 \times 64}$ --- \emph{temporal} sequence, $\approx$86\,Hz
+        \item \textbf{Decoder:} transposed Conv1d (mirror encoder) $\to$ waveform
+        \item \textbf{Loss:} multi-res STFT (2048, 1024, 512, 256) + $\beta$-KL
+    \end{itemize}
+
+    \end{multicols}
+
+    \medskip
+    \textcolor{accent}{\textbf{Key design choice:}} RawAudioVAE uses a \textbf{temporal latent space} ---
+    each latent frame $\approx 11.6$\,ms of audio, preserving fine temporal structure
+    that SpecVAE's single-vector latent cannot represent. Free bits ($\lambda = 0.25$) prevent posterior collapse.
+
+    \medskip
+    \textit{[Architecture diagrams to be added]}
+}
+
+% ── 5. Reconstruction Quality ───────────────────────────
+\block{5.~Reconstruction Quality}{
+    \begin{center}
+    \begin{minipage}{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{specvae/spectrograms.png}\\
+        {\small\textcolor{subtletxt}{\textbf{SpecVAE} (ep 232, myAudioDataset)}}
+    \end{minipage}\hfill
+    \begin{minipage}{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{rawvae_esc50/spectrograms.png}\\
+        {\small\textcolor{subtletxt}{\textbf{RawAudioVAE} (ESC-50)}}
+    \end{minipage}
+    \end{center}
+
+    \medskip
+    Each panel: \textbf{Original} (top) $\vert$ \textbf{Reconstructed} (middle) $\vert$ \textbf{Difference} (bottom).
+    RawAudioVAE's temporal latent captures fine spectral structure that SpecVAE smooths over.
+    Remaining artefacts: low-frequency distortion, addressable with perceptual loss weighting.
+}
+
+% ── 8. Demo ─────────────────────────────────────────────
+\block{8.~Interactive Demo}{
+    \begin{center}
+        \textit{[Demo screenshot --- poster/demo\_screenshot.png]}
+        \vspace{2mm}
+
+        {\small Upload any audio file, drag the slider to morph between two sounds
+        in latent space. Outputs decoded audio + STFT spectrogram + latent PCA scatter.}
+
+        \vspace{3mm}
+        \texttt{python demo\_raw.py -r saved/models/RawAudioVAE/<run>/model\_best.pth}
+
+        \vspace{3mm}
+        \textit{[QR code to GitHub / demo]}
+    \end{center}
+}
+
+
+% ╔══════════════════════════════════╗
+% ║  RIGHT COLUMN  (0.25)           ║
+% ╚══════════════════════════════════╝
+\column{0.25}
+
+% ── 3. Training Setup ───────────────────────────────────
+\block{3.~Training Setup}{
+    \renewcommand{\arraystretch}{1.25}
+    \setlength{\tabcolsep}{4pt}
+    \begin{center}
+    \small
+    \begin{tabular}{l p{1.8cm} p{1.8cm} p{1.8cm}}
+        \toprule
+        & \textbf{SpecVAE} & \textbf{RawVAE small} & \textbf{RawVAE ESC-50} \\
+        \midrule
+        Dataset   & myAudio & myAudio & ESC-50 \\
+        Files     & 29 & 29 & 2{,}000 \\
+        Classes   & 2  & 2  & 50 \\
+        Chunks    & $\sim$165 & $\sim$165 & $\sim$9{,}600 \\
+        Latent    & $\mathbb{R}^{32}$ & $\mathbb{R}^{32\times64}$ & $\mathbb{R}^{32\times64}$ \\
+        Recon loss & MSE (mel) & Multi-res & Multi-res \\
+                   &           & STFT & STFT \\
+        $\beta$ warmup & --- & $0{\to}0.05$ & $0{\to}0.05$ \\
+                       &     & /100\,ep & /100\,ep \\
+        Free bits & --- & $\lambda{=}0.25$ & $\lambda{=}0.25$ \\
+        Best val  & --- & 1.497 & 1.355 \\
+        \quad recon &   & (ep\,675) & (ep\,143+) \\
+        \bottomrule
+    \end{tabular}
+    \end{center}
+
+    \medskip
+    \textcolor{accentblue}{\textbf{Note:}} Free bits enforce a minimum KL per latent
+    dimension, preventing dimensions from collapsing to the prior.
+    ESC-50 generalises far better --- beats 1000-epoch small-data run in $<$150 epochs.
+}
+
+% ── 6. Latent Space Structure ───────────────────────────
+\block{6.~Latent Space Structure}{
+    \begin{center}
+        \includegraphics[width=0.95\linewidth]{rawvae_esc50/kl_per_dim.png}
+        {\small\textcolor{subtletxt}{KL per latent dim --- ESC-50 ep 100}}
+        \vspace{3mm}
+
+        \includegraphics[width=0.95\linewidth]{rawvae_esc50/latent_pca.png}
+        {\small\textcolor{subtletxt}{Latent PCA scatter (colour = class, unsupervised)}}
+    \end{center}
+
+    \medskip
+    Free bits enforce a floor at $\lambda{=}0.25$ nats per dim.
+    PCA scatter shows \textbf{class separation emerges unsupervised}
+    --- no class labels used during training.
+}
+
+% ── 9. Conclusions & Future Work ────────────────────────
+\block{9.~Conclusions \& Future Work}{
+    \textcolor{accentblue}{\textbf{What worked:}}
+    \begin{itemize}[leftmargin=1.2em, itemsep=1pt]
+        \item Raw waveform VAE with multi-resolution STFT loss trains stably
+        \item Temporal latent space richer than single-vector SpecVAE
+        \item ESC-50 generalises far better; beats 1000-ep small-data run in $<$150\,ep
+        \item Free bits + $\beta$ warmup prevents posterior collapse
+    \end{itemize}
+
+    \medskip
+    \textcolor{accentorange}{\textbf{Future work:}}
+    \begin{itemize}[leftmargin=1.2em, itemsep=1pt]
+        \item Adversarial / feature-matching loss (RAVE-style) for perceptual quality
+        \item Perceptual weighting to address low-frequency distortion
+        \item Larger latent dim (64+) for diverse datasets
+        \item Streaming / real-time inference
+    \end{itemize}
+
+    \medskip
+    \textcolor{subtletxt}{\small
+    \textbf{References:} Kingma \& Welling, VAE (2013);
+    Caillon \& Esling, RAVE (2021);
+    Défossez et al., EnCodec (2022).
+    }
+}
+
+\end{columns}
+
+\end{document}
