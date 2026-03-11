@@ -50,8 +50,8 @@
 
 % Compact title area
 \definetitlestyle{CompactStanford}{
-    width=880mm, roundedcorners=20, linewidth=0.3cm, innersep=0.4cm,
-    titletotopverticalspace=2mm, titletoblockverticalspace=4mm,
+    width=880mm, roundedcorners=20, linewidth=0.3cm, innersep=0.1cm,
+    titletotopverticalspace=12mm, titletoblockverticalspace=4mm,
     titlegraphictotitledistance=10pt, titletextscale=1
 }{
     \begin{scope}[line width=\titlelinewidth, rounded corners=\titleroundedcorners]
@@ -93,24 +93,28 @@
 % ── 1. Motivation ───────────────────────────────────────
 \block{1.~Motivation}{
     \textbf{Variational Autoencoders} learn compact latent representations
-    enabling reconstruction, synthesis, and \emph{morphing} between sounds ---
-    but high-quality waveform decoding remains hard.
+    enabling reconstruction, synthesis, and morphing between sounds -
+    but high-quality waveform reconstruction remains hard.
 
     \medskip
+    \vspace{5mm}
     \textbf{Key Question:} What is the minimal VAE architecture that yields
-    convincing audio \emph{and} a musically useful latent space?
+    convincing audio and a musically useful latent space?
 
     \medskip
+    \vspace{5mm}
     \textbf{Creative Potential:}
-    The latent space as a synthesis interface --- morph between sounds
+    The latent space as a synthesis interface - morph between sounds
     in a learned latent space.
 
     \medskip
+    \vspace{5mm}
     \textbf{Progression:}
-    \begin{itemize}[leftmargin=1.2em, itemsep=2pt]
-        \item \textbf{SpecVAE} --- spectrogram-domain baseline
-        \item \textbf{RawAudioVAE (small)} --- raw waveform, 29 files
-        \item \textbf{RawAudioVAE (ESC-50)} --- 2000 clips, 50 classes
+    \begin{itemize}[leftmargin=1em, noitemsep, topsep=1pt]
+        \item \textbf{SpecVAE} - spectrogram-domain baseline, 29 files
+        \item \textbf{RawAudioVAE (small)} - raw waveform, 29 files
+        \item \textbf{RawAudioVAE (ESC-50)} - 2000 clips, 50 classes
+        \item \textbf{RawAudioVAE (Medley-Solos-DB)} - 21k clips, 8 tonal instruments \textit{(in progress)}
     \end{itemize}
 }
 
@@ -126,9 +130,8 @@
     \par
 
     \medskip
-    \textcolor{accentblue}{\textbf{Key:}} $\beta$ warmup (0 $\to$ 0.05 over 100 ep)
+    $\beta$ warmup (0 $\to$ 0.05 over 100 ep)
     prevents posterior collapse while maintaining reconstruction quality.
-    (Not Pictured...)
     %ESC-50 run (not shown) beats small-dataset best in $<$150 epochs.
 }
 
@@ -174,7 +177,7 @@
     \begin{itemize}[leftmargin=1em, noitemsep, topsep=1pt]
         \item \textbf{Input:} raw waveform ($1 \times 16{,}384$ samples, 22\,kHz)
         \item \textbf{Encoder:} Conv1d ($\times$4, stride 4) + dilated residual
-        \item \textbf{Latent:} $z \in \mathbb{R}^{32 \times 64}$ --- \emph{temporal} sequence, $\approx$86\,Hz
+        \item \textbf{Latent:} $z \in \mathbb{R}^{32 \times 64}$ - temporal sequence, $\approx$86\,Hz
         \item \textbf{Decoder:} Conv1d (mirror encoder) $\to$ waveform
         \item \textbf{Loss:} multi-res STFT (2048, 1024, 512, 256) + $\beta$-KL
     \end{itemize}
@@ -182,9 +185,9 @@
     \end{multicols}
 
     \medskip
-    RawAudioVAE uses a \textbf{temporal latent space} ---
-    each latent frame $\approx 11.6$\,ms of audio, preserving fine temporal structure
-    that SpecVAE's single-vector latent cannot represent. Free bits ($\lambda = 0.25$) prevent posterior collapse.
+    RawAudioVAE uses a \textbf{temporal latent space} -
+    each latent frame $\approx 11.6$\,ms of audio, preserving finer temporal structure
+    than SpecVAE's single-vector latent can represent. Free bits ($\lambda = 0.25$) prevent posterior collapse.
 }
 
 % ── 5. Reconstruction Quality ───────────────────────────
@@ -205,6 +208,7 @@
 
     \medskip
     \justifying
+    \vspace{2mm}
     % Each panel: \textbf{Original} (top) $\vert$ \textbf{Reconstructed} (middle).
     The RawAudioVAE creates better reconstructions, especially where tonal audio is present.
 }
@@ -223,7 +227,7 @@
 
         \medskip
         \textcolor{subtletxt}{\small To run locally:}
-        {\footnotesize\texttt{python demo\_raw.py}
+        {\small\texttt{python demo\_raw.py}
         \texttt{\quad -r <checkpoint>.pth}}
     \end{minipage}
     \hfill
@@ -258,7 +262,7 @@
         Loss      & MSE mel & MR-STFT & MR-STFT \\
         $\beta$ warmup & --- & $0{\to}0.05$ & $0{\to}0.05$ \\
         Free bits & ---     & $\lambda{=}0.25$ & $\lambda{=}0.25$ \\
-        Best val  & ---     & 1.497 (675) & 1.355 (143+) \\
+        Best val  & ---     & 1.497 (675) & 1.244 (350) \\
         \bottomrule
     \end{tabular}
     \par\vspace{-2mm}
@@ -268,12 +272,13 @@
 
 % ── 6. Latent Space Structure ───────────────────────────
 \block{6.~Latent Space Structure}{
+    \vspace{-10mm}
     \begin{center}
-        \includegraphics[width=0.6\linewidth]{rawvae_esc50/kl_per_dim.png}\\[-5mm]
+        \includegraphics[width=0.6\linewidth]{rawvae_esc50_ep400/kl_per_dim.png}\\[-5mm]
         {\small\textcolor{subtletxt}{KL per latent dim (ESC-50)}}
         \vspace{3mm}
 
-        \includegraphics[width=0.75\linewidth]{rawvae_esc50/latent_pca.png}\\[-10mm]
+        \includegraphics[width=0.75\linewidth]{rawvae_esc50_ep400/latent_pca.png}\\[-10mm]
         {\small\textcolor{subtletxt}{Latent PCA scatter (colour = class, unsupervised)}}
     \end{center}
 
@@ -290,24 +295,25 @@
         \item RawAudioVAE with multi-resolution STFT loss trains stably and
         improves over SpecVAE baseline.
         \item Larger dataset (ESC-50) generalizes better.
-        \item Free bits + $\beta$ warmup prevents posterior collapse
+        %\item Free bits + $\beta$ warmup prevents posterior collapse
     \end{itemize}
 
     \medskip
     \textcolor{accentorange}{\textbf{Future work:}}
     \begin{itemize}[leftmargin=1em, noitemsep, topsep=1pt]
         \item Adversarial / feature-matching loss for perceptual quality
-        \item Larger dataset + longer training time
-        \item Larger latent dim (64+) for diverse datasets
-        \item Streaming / real-time inference
+        \item Larger dataset, more latent dims, longer training time
+        %\item Larger latent dim (64+) for diverse datasets
+        %\item Streaming / real-time inference
     \end{itemize}
 
     \medskip
-    \textcolor{subtletxt}{\small
-    \textbf{References:} Kingma \& Welling, VAE (2013);
+    {\color{subtletxt} \footnotesize \setlength{\baselineskip}{1.1em}
+    \textbf{References:} Kingma \& Welling, Auto-Encoding Variational Bayes (2013);
     Caillon \& Esling, RAVE (2021);
-    Défossez et al., EnCodec (2022).
-    }
+    Natsiou et al., Interpretable Timbre Synthesis using VAEs (2023);
+    Piczak, ESC-50 Dataset (2015);
+    Lostanlen et al., Medley-solos-DB (2019). \par}
 }
 
 \end{columns}
