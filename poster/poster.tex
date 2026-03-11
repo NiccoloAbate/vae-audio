@@ -160,7 +160,7 @@
     \begin{multicols}{2}
 
     \textcolor{accentblue}{\textbf{SpecVAE}}
-    \begin{itemize}[leftmargin=1em, nosep]
+    \begin{itemize}[leftmargin=1em, noitemsep, topsep=1pt]
         \item \textbf{Input:} log-mel spectrogram (64\,bins $\times$ T\,frames)
         \item \textbf{Encoder:} Conv1d stack $\to$ FC $\to$ $\mu, \sigma$
         \item \textbf{Latent:} $z \in \mathbb{R}^{32}$ per chunk (single vector)
@@ -171,7 +171,7 @@
     \columnbreak
 
     \textcolor{accentorange}{\textbf{RawAudioVAE}}
-    \begin{itemize}[leftmargin=1em, nosep]
+    \begin{itemize}[leftmargin=1em, noitemsep, topsep=1pt]
         \item \textbf{Input:} raw waveform ($1 \times 16{,}384$ samples, 22\,kHz)
         \item \textbf{Encoder:} Conv1d ($\times$4, stride 4) + dilated residual
         \item \textbf{Latent:} $z \in \mathbb{R}^{32 \times 64}$ --- \emph{temporal} sequence, $\approx$86\,Hz
@@ -211,7 +211,7 @@
 
 % ── 8. Demo ─────────────────────────────────────────────
 \block{8.~Interactive Demo}{
-    \begin{minipage}[c]{0.7\linewidth}
+    \begin{minipage}[c]{0.64\linewidth}
         Upload \textbf{2--3 audio files}, drag the slider to morph between them
         in latent space using slerp.
 
@@ -227,7 +227,7 @@
         \texttt{\quad -r <checkpoint>.pth}}
     \end{minipage}
     \hfill
-    \begin{minipage}[c]{0.3\linewidth}
+    \begin{minipage}[c]{0.36\linewidth}
         \vspace*{-2mm}
         \includegraphics[width=\linewidth]{demo.png}
     \end{minipage}
@@ -253,7 +253,7 @@
         Dataset   & Small & Small & ESC-50 \\
         Files     & 29      & 29      & 2{,}000 \\
         Classes   & 2       & 2       & 50 \\
-        Chunks    & 165     & 165     & 9{,}600 \\
+        % Chunks    & 165     & 165     & 9{,}600 \\
         Latent    & $\mathbb{R}^{32}$ & $32{\times}64$ & $32{\times}64$ \\
         Loss      & MSE mel & MR-STFT & MR-STFT \\
         $\beta$ warmup & --- & $0{\to}0.05$ & $0{\to}0.05$ \\
@@ -261,7 +261,7 @@
         Best val  & ---     & 1.497 (675) & 1.355 (143+) \\
         \bottomrule
     \end{tabular}
-    \par\vspace{1mm}
+    \par\vspace{-2mm}
     % Free bits enforce min KL per dim.
     % ESC-50 beats the 1000-epoch small-data run in $<$150 epochs.
 }
@@ -269,15 +269,16 @@
 % ── 6. Latent Space Structure ───────────────────────────
 \block{6.~Latent Space Structure}{
     \begin{center}
-        \includegraphics[width=0.82\linewidth]{rawvae_esc50/kl_per_dim.png}\\[-3mm]
+        \includegraphics[width=0.6\linewidth]{rawvae_esc50/kl_per_dim.png}\\[-5mm]
         {\small\textcolor{subtletxt}{KL per latent dim (ESC-50)}}
         \vspace{3mm}
 
-        \includegraphics[width=0.82\linewidth]{rawvae_esc50/latent_pca.png}\\[-7mm]
+        \includegraphics[width=0.75\linewidth]{rawvae_esc50/latent_pca.png}\\[-10mm]
         {\small\textcolor{subtletxt}{Latent PCA scatter (colour = class, unsupervised)}}
     \end{center}
 
     \medskip
+    \vspace{-5mm}
     PCA scatter shows \textbf{class separation emerges unsupervised}
     --- no class labels used during training.
 }
@@ -285,18 +286,18 @@
 % ── 9. Conclusions & Future Work ────────────────────────
 \block{9.~Conclusions \& Future Work}{
     \textcolor{accentblue}{\textbf{What worked:}}
-    \begin{itemize}[leftmargin=1.2em, itemsep=1pt]
-        \item Raw waveform VAE with multi-resolution STFT loss trains stably
-        \item Temporal latent space richer than single-vector SpecVAE
-        \item ESC-50 generalises far better; beats 1000-ep small-data run in $<$150\,ep
+    \begin{itemize}[leftmargin=1em, noitemsep, topsep=1pt]
+        \item RawAudioVAE with multi-resolution STFT loss trains stably and
+        improves over SpecVAE baseline.
+        \item Larger dataset (ESC-50) generalizes better.
         \item Free bits + $\beta$ warmup prevents posterior collapse
     \end{itemize}
 
     \medskip
     \textcolor{accentorange}{\textbf{Future work:}}
-    \begin{itemize}[leftmargin=1.2em, itemsep=1pt]
-        \item Adversarial / feature-matching loss (RAVE-style) for perceptual quality
-        \item Perceptual weighting to address low-frequency distortion
+    \begin{itemize}[leftmargin=1em, noitemsep, topsep=1pt]
+        \item Adversarial / feature-matching loss for perceptual quality
+        \item Larger dataset + longer training time
         \item Larger latent dim (64+) for diverse datasets
         \item Streaming / real-time inference
     \end{itemize}
