@@ -160,7 +160,7 @@
     \begin{multicols}{2}
 
     \textcolor{accentblue}{\textbf{SpecVAE}}
-    \begin{itemize}[leftmargin=1em, itemsep=1pt]
+    \begin{itemize}[leftmargin=1em, nosep]
         \item \textbf{Input:} log-mel spectrogram (64\,bins $\times$ T\,frames)
         \item \textbf{Encoder:} Conv1d stack $\to$ FC $\to$ $\mu, \sigma$
         \item \textbf{Latent:} $z \in \mathbb{R}^{32}$ per chunk (single vector)
@@ -171,7 +171,7 @@
     \columnbreak
 
     \textcolor{accentorange}{\textbf{RawAudioVAE}}
-    \begin{itemize}[leftmargin=1em, itemsep=1pt]
+    \begin{itemize}[leftmargin=1em, nosep]
         \item \textbf{Input:} raw waveform ($1 \times 16{,}384$ samples, 22\,kHz)
         \item \textbf{Encoder:} Conv1d ($\times$4, stride 4) + dilated residual
         \item \textbf{Latent:} $z \in \mathbb{R}^{32 \times 64}$ --- \emph{temporal} sequence, $\approx$86\,Hz
