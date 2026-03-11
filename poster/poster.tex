@@ -167,7 +167,7 @@
     \begin{itemize}[leftmargin=1em, noitemsep, topsep=1pt]
         \item \textbf{Input:} log-mel spectrogram (64\,bins $\times$ T\,frames)
         \item \textbf{Encoder:} Conv1d stack $\to$ FC $\to$ $\mu, \sigma$
-        \item \textbf{Latent:} $z \in \mathbb{R}^{32}$ per 500\,ms single-vector chunk
+        \item \textbf{Latent:} $z \in \mathbb{R}^{32}$ per 500\,ms chunk (non temporal)
         \item \textbf{Decoder:} FC $\to$ Conv1d $\to$ spec $\to$ Griffin-Lim
         \item \textbf{Loss:} MSE on mel spectrogram + $\beta$-KL
     \end{itemize}
@@ -216,7 +216,7 @@
 \block{8.~Interactive Demo}{
     \begin{minipage}[c]{0.6\linewidth}
         Upload \textbf{2--3 audio files} and reconstruct them in the learned latent space.
-        Drag the slider to morph between them in latent space using slerp.
+        Drag the slider to smoothly morph between them in using slerp.
 
         \medskip
         \textbf{Outputs:} decoded audio $|$ STFT spectrogram $|$ latent analysis.
@@ -278,13 +278,13 @@
         \vspace{3mm}
 
         \includegraphics[width=0.75\linewidth]{rawvae_esc50_ep400/latent_pca.png}\\[-10mm]
-        {\small\textcolor{subtletxt}{Latent PCA scatter (colour = class, unsupervised)}}
+        {\small\textcolor{subtletxt}{Latent PCA scatter (color = class, unsupervised)}}
     \end{center}
 
     \medskip
     \vspace{-5mm}
-    PCA scatter shows \textbf{class separation emerges unsupervised}
-    --- no class labels used during training.
+    PCA scatter shows that \textbf{class separation emerges unsupervised}
+    - no class labels used during training.
 }
 
 % ── 9. Conclusions & Future Work ────────────────────────
@@ -293,7 +293,8 @@
     \begin{itemize}[leftmargin=1em, noitemsep, topsep=1pt]
         \item RawAudioVAE with multi-resolution STFT loss trains stably and
         improves over SpecVAE baseline.
-        \item Larger dataset (ESC-50) generalizes better.
+        \item Latent space enables smooth perceptual morphing.
+        %\item Larger dataset (ESC-50) generalizes better.
         %\item Free bits + $\beta$ warmup prevents posterior collapse
     \end{itemize}
 
