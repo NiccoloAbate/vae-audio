@@ -1,4 +1,4 @@
-\documentclass[20pt]{tikzposter}
+\documentclass[20pt, colspace=4mm]{tikzposter}
 \geometry{paperwidth=36in, paperheight=24in}
 
 \usepackage[T1]{fontenc}
@@ -66,7 +66,7 @@
 
 % Reduce margins and block spacing
 \makeatletter
-\TP@blockverticalspace=6mm
+\TP@blockverticalspace=4mm
 \setlength{\TP@visibletextwidth}{\paperwidth-2cm}
 \setlength{\TP@visibletextheight}{\paperheight-6cm}
 \makeatother
@@ -88,7 +88,7 @@
 % ╔══════════════════════════════════╗
 % ║  LEFT COLUMN  (0.25)            ║
 % ╚══════════════════════════════════╝
-\column{0.25}
+\column{0.265}
 
 % ── 1. Motivation ───────────────────────────────────────
 \block{1.~Motivation}{
@@ -97,20 +97,20 @@
     but high-quality waveform decoding remains hard.
 
     \medskip
-    \textbf{Key question:} What is the minimal VAE architecture that yields
+    \textbf{Key Question:} What is the minimal VAE architecture that yields
     convincing audio \emph{and} a musically useful latent space?
 
     \medskip
-    \textcolor{accentblue}{\textbf{Creative potential:}}
-    The latent space as a synthesis interface --- drag a slider to
-    continuously morph between any two sounds.
+    \textbf{Creative Potential:}
+    The latent space as a synthesis interface --- morph between sounds
+    in a learned latent space.
 
     \medskip
     \textbf{Progression:}
     \begin{itemize}[leftmargin=1.2em, itemsep=2pt]
         \item \textbf{SpecVAE} --- spectrogram-domain baseline
         \item \textbf{RawAudioVAE (small)} --- raw waveform, 29 files
-        \item \textbf{RawAudioVAE (ESC-50)} --- scale to 2000 clips, 50 classes
+        \item \textbf{RawAudioVAE (ESC-50)} --- 2000 clips, 50 classes
     \end{itemize}
 }
 
@@ -122,22 +122,18 @@
 
         {\small\textcolor{subtletxt}{RawAudioVAE (small dataset, 1000 epochs)}}
         \vspace{3mm}
-
-        \includegraphics[width=0.95\linewidth]{specvae/training_curves.png}
-
-        {\small\textcolor{subtletxt}{SpecVAE (myAudioDataset, 232 epochs)}}
     \end{center}
 
     \medskip
     \textcolor{accentblue}{\textbf{Key:}} $\beta$ warmup (0 $\to$ 0.05 over 100 ep)
     prevents posterior collapse while maintaining reconstruction quality.
-    ESC-50 run (not shown) beats small-dataset best in $<$150 epochs.
+    %ESC-50 run (not shown) beats small-dataset best in $<$150 epochs.
 }
 
 % ── 7. Interpolation ────────────────────────────────────
 \block{7.~Latent Space Interpolation}{
     \begin{center}
-        \includegraphics[width=0.95\linewidth]{rawvae_small/interp_00_00eac343_to_00ae03f6_grid.png}
+        \includegraphics[width=0.95\linewidth]{rawvae_small/interp_edit.png}
     \end{center}
 
     \medskip
@@ -155,7 +151,7 @@
 % ╔══════════════════════════════════╗
 % ║  CENTER COLUMN  (0.50)          ║
 % ╚══════════════════════════════════╝
-\column{0.50}
+\column{0.47}
 
 % ── 2. Architecture Overview ────────────────────────────
 \block{2.~Architecture Overview}{
@@ -174,22 +170,19 @@
 
     \textcolor{accentorange}{\textbf{RawAudioVAE}}
     \begin{itemize}[leftmargin=1em, itemsep=1pt]
-        \item \textbf{Input:} raw waveform ($1 \times 16{,}384$ samples @ 22\,kHz)
-        \item \textbf{Encoder:} strided Conv1d ($\times$4, stride 4) + dilated residual
+        \item \textbf{Input:} raw waveform ($1 \times 16{,}384$ samples, 22\,kHz)
+        \item \textbf{Encoder:} Conv1d ($\times$4, stride 4) + dilated residual
         \item \textbf{Latent:} $z \in \mathbb{R}^{32 \times 64}$ --- \emph{temporal} sequence, $\approx$86\,Hz
-        \item \textbf{Decoder:} transposed Conv1d (mirror encoder) $\to$ waveform
+        \item \textbf{Decoder:} Conv1d (mirror encoder) $\to$ waveform
         \item \textbf{Loss:} multi-res STFT (2048, 1024, 512, 256) + $\beta$-KL
     \end{itemize}
 
     \end{multicols}
 
     \medskip
-    \textcolor{accent}{\textbf{Key design choice:}} RawAudioVAE uses a \textbf{temporal latent space} ---
+    RawAudioVAE uses a \textbf{temporal latent space} ---
     each latent frame $\approx 11.6$\,ms of audio, preserving fine temporal structure
     that SpecVAE's single-vector latent cannot represent. Free bits ($\lambda = 0.25$) prevent posterior collapse.
-
-    \medskip
-    \textit{[Architecture diagrams to be added]}
 }
 
 % ── 5. Reconstruction Quality ───────────────────────────
@@ -197,20 +190,19 @@
     \begin{center}
     \begin{minipage}{0.48\linewidth}
         \centering
-        \includegraphics[width=\linewidth]{specvae/spectrograms.png}\\
-        {\small\textcolor{subtletxt}{\textbf{SpecVAE} (ep 232, myAudioDataset)}}
+        \includegraphics[width=\linewidth]{specvae/spectrograms_edit.png}\\
+        {\small\textcolor{subtletxt}{\textbf{SpecVAE} (Small)}}
     \end{minipage}\hfill
     \begin{minipage}{0.48\linewidth}
         \centering
-        \includegraphics[width=\linewidth]{rawvae_esc50/spectrograms.png}\\
-        {\small\textcolor{subtletxt}{\textbf{RawAudioVAE} (ESC-50)}}
+        \includegraphics[width=\linewidth]{rawvae_small/spectrograms_edit.png}\\
+        {\small\textcolor{subtletxt}{\textbf{RawAudioVAE} (Small)}}
     \end{minipage}
     \end{center}
 
     \medskip
-    Each panel: \textbf{Original} (top) $\vert$ \textbf{Reconstructed} (middle) $\vert$ \textbf{Difference} (bottom).
-    RawAudioVAE's temporal latent captures fine spectral structure that SpecVAE smooths over.
-    Remaining artefacts: low-frequency distortion, addressable with perceptual loss weighting.
+    Each panel: \textbf{Original} (top) $\vert$ \textbf{Reconstructed} (middle).
+    The RawAudioVAE creates better reconstructions, especially where tonal audio is present.
 }
 
 % ── 8. Demo ─────────────────────────────────────────────
@@ -234,53 +226,49 @@
 % ╔══════════════════════════════════╗
 % ║  RIGHT COLUMN  (0.25)           ║
 % ╚══════════════════════════════════╝
-\column{0.25}
+\column{0.265}
 
 % ── 3. Training Setup ───────────────────────────────────
 \block{3.~Training Setup}{
-    \renewcommand{\arraystretch}{1.25}
-    \setlength{\tabcolsep}{4pt}
+    \renewcommand{\arraystretch}{1.2}
+    \setlength{\tabcolsep}{3pt}
     \begin{center}
-    \small
-    \begin{tabular}{l p{1.8cm} p{1.8cm} p{1.8cm}}
+    \footnotesize
+    \begin{tabular}{l c c c}
         \toprule
-        & \textbf{SpecVAE} & \textbf{RawVAE small} & \textbf{RawVAE ESC-50} \\
+        & \textbf{SpecVAE} & \textbf{Raw (small)} & \textbf{Raw (ESC-50)} \\
         \midrule
         Dataset   & myAudio & myAudio & ESC-50 \\
-        Files     & 29 & 29 & 2{,}000 \\
-        Classes   & 2  & 2  & 50 \\
-        Chunks    & $\sim$165 & $\sim$165 & $\sim$9{,}600 \\
-        Latent    & $\mathbb{R}^{32}$ & $\mathbb{R}^{32\times64}$ & $\mathbb{R}^{32\times64}$ \\
-        Recon loss & MSE (mel) & Multi-res & Multi-res \\
-                   &           & STFT & STFT \\
+        Files     & 29      & 29      & 2{,}000 \\
+        Classes   & 2       & 2       & 50 \\
+        Chunks    & 165     & 165     & 9{,}600 \\
+        Latent    & $\mathbb{R}^{32}$ & $32{\times}64$ & $32{\times}64$ \\
+        Loss      & MSE mel & MR-STFT & MR-STFT \\
         $\beta$ warmup & --- & $0{\to}0.05$ & $0{\to}0.05$ \\
-                       &     & /100\,ep & /100\,ep \\
-        Free bits & --- & $\lambda{=}0.25$ & $\lambda{=}0.25$ \\
-        Best val  & --- & 1.497 & 1.355 \\
-        \quad recon &   & (ep\,675) & (ep\,143+) \\
+        Free bits & ---     & $\lambda{=}0.25$ & $\lambda{=}0.25$ \\
+        Best val  & ---     & 1.497 (675) & 1.355 (143+) \\
         \bottomrule
     \end{tabular}
     \end{center}
 
     \medskip
-    \textcolor{accentblue}{\textbf{Note:}} Free bits enforce a minimum KL per latent
-    dimension, preventing dimensions from collapsing to the prior.
-    ESC-50 generalises far better --- beats 1000-epoch small-data run in $<$150 epochs.
+    Free bits enforce min KL per dim.
+    ESC-50 beats the 1000-epoch small-data run in $<$150 epochs.
 }
 
 % ── 6. Latent Space Structure ───────────────────────────
 \block{6.~Latent Space Structure}{
     \begin{center}
         \includegraphics[width=0.95\linewidth]{rawvae_esc50/kl_per_dim.png}
-        {\small\textcolor{subtletxt}{KL per latent dim --- ESC-50 ep 100}}
-        \vspace{3mm}
+        {\small\textcolor{subtletxt}{KL per latent dim (ESC-50)}}
+        \vspace{0mm}
 
         \includegraphics[width=0.95\linewidth]{rawvae_esc50/latent_pca.png}
         {\small\textcolor{subtletxt}{Latent PCA scatter (colour = class, unsupervised)}}
+        \vspace{0mm}
     \end{center}
 
     \medskip
-    Free bits enforce a floor at $\lambda{=}0.25$ nats per dim.
     PCA scatter shows \textbf{class separation emerges unsupervised}
     --- no class labels used during training.
 }
