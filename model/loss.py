@@ -49,6 +49,45 @@ def raw_audio_vae_loss(y, y_hat, mu, logvar, free_bits=0.25):
     return multi_res_stft_loss(y, y_hat), kld_temporal(mu, logvar, free_bits)
 
 
+def discriminator_loss(real_outputs, fake_outputs):
+    """Hinge loss for the multi-scale discriminator.
+
+    real_outputs / fake_outputs: list of (feature_maps, logits) — one per scale.
+    Loss = mean over scales of [ relu(1-real) + relu(1+fake) ].
+    """
+    loss = torch.zeros(1, device=real_outputs[0][1].device)
+    for (_, real_logits), (_, fake_logits) in zip(real_outputs, fake_outputs):
+        loss = loss + F.relu(1.0 - real_logits).mean()
+        loss = loss + F.relu(1.0 + fake_logits).mean()
+    return loss / len(real_outputs)
+
+
+def generator_adversarial_loss(fake_outputs):
+    """Hinge generator loss: fool the discriminator by pushing logits positive.
+
+    fake_outputs: list of (feature_maps, logits) from disc(y_hat).
+    """
+    loss = torch.zeros(1, device=fake_outputs[0][1].device)
+    for _, fake_logits in fake_outputs:
+        loss = loss - fake_logits.mean()
+    return loss / len(fake_outputs)
+
+
+def feature_matching_loss(real_outputs, fake_outputs):
+    """L1 between discriminator intermediate feature maps (real vs fake).
+
+    Real features are detached so no gradient flows back through them.
+    fake_outputs must NOT be detached — gradients flow to the generator.
+    """
+    loss = torch.zeros(1, device=fake_outputs[0][1].device)
+    n = 0
+    for (real_feats, _), (fake_feats, _) in zip(real_outputs, fake_outputs):
+        for rf, ff in zip(real_feats, fake_feats):
+            loss = loss + F.l1_loss(ff, rf.detach())
+            n += 1
+    return loss / n
+
+
 def vae_loss(q_mu, q_logvar, output, target):
     return mse_loss(output, target), kld_gauss(q_mu, q_logvar)
 

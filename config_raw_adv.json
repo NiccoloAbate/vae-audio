@@ -1,0 +1,61 @@
+{
+    "name": "RawAudioVAE_Adv",
+    "n_gpu": 1,
+
+    "arch": {
+        "type": "RawAudioVAE",
+        "args": {
+            "latent_dim": 32,
+            "channels": [32, 64, 128, 256, 512],
+            "strides": [4, 4, 4, 4]
+        }
+    },
+
+    "data_loader": {
+        "type": "RawAudioDataLoader",
+        "args": {
+            "data_dir": ["dataset/myAudioDataset/audio"],
+            "sr": 22050,
+            "chunk_size": 16384,
+            "batch_size": 16,
+            "shuffle": true,
+            "validation_split": 0.1,
+            "num_workers": 0,
+            "subset": "train"
+        }
+    },
+
+    "optimizer": {
+        "type": "Adam",
+        "args": {
+            "lr": 0.0003,
+            "weight_decay": 0,
+            "amsgrad": true
+        }
+    },
+
+    "loss": "raw_audio_vae_loss",
+    "metrics": [],
+
+    "lr_scheduler": {
+        "type": "StepLR",
+        "args": {
+            "step_size": 200,
+            "gamma": 0.5
+        }
+    },
+
+    "trainer": {
+        "type": "RawAudioVaeAdversarialTrainer",
+        "epochs": 1000,
+
+        "save_dir": "saved/",
+        "save_period": 10,
+        "verbosity": 2,
+
+        "monitor": "min val_loss",
+        "early_stop": 1000,
+
+        "tensorboardX": true
+    }
+}

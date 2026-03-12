@@ -275,6 +275,65 @@ class SpecVAE(BaseVAE):
         return x_recon, mu, logvar, z
 
 
+# ---------------------------------------------------------------------------
+# Multi-Scale Waveform Discriminator (MelGAN-style)
+# ---------------------------------------------------------------------------
+
+class WaveformDiscriminatorBlock(nn.Module):
+    """Single-scale waveform discriminator.
+
+    Returns (feature_maps, logits) where feature_maps is a list of
+    intermediate activations used for feature-matching loss.
+    """
+    def __init__(self):
+        super().__init__()
+        self.convs = nn.ModuleList([
+            nn.utils.weight_norm(nn.Conv1d(1,    16,   15, 1,  padding=7)),
+            nn.utils.weight_norm(nn.Conv1d(16,   64,   41, 4,  groups=4,   padding=20)),
+            nn.utils.weight_norm(nn.Conv1d(64,   256,  41, 4,  groups=16,  padding=20)),
+            nn.utils.weight_norm(nn.Conv1d(256,  1024, 41, 4,  groups=64,  padding=20)),
+            nn.utils.weight_norm(nn.Conv1d(1024, 1024, 41, 4,  groups=256, padding=20)),
+            nn.utils.weight_norm(nn.Conv1d(1024, 1024, 5,  1,  padding=2)),
+        ])
+        self.output_conv = nn.utils.weight_norm(nn.Conv1d(1024, 1, 3, 1, padding=1))
+
+    def forward(self, x):
+        features = []
+        for conv in self.convs:
+            x = F.leaky_relu(conv(x), 0.2)
+            features.append(x)
+        logits = self.output_conv(x)
+        features.append(logits)
+        return features, logits
+
+
+class MultiScaleDiscriminator(nn.Module):
+    """Three-scale waveform discriminator.
+
+    Runs three WaveformDiscriminatorBlocks on the waveform at
+    progressively lower resolutions (original, 2x, 4x downsampled).
+
+    forward() returns a list of (feature_maps, logits) — one per scale.
+    """
+    def __init__(self):
+        super().__init__()
+        self.discriminators = nn.ModuleList([
+            WaveformDiscriminatorBlock(),
+            WaveformDiscriminatorBlock(),
+            WaveformDiscriminatorBlock(),
+        ])
+
+    def forward(self, x):
+        results = []
+        x_i = x
+        for i, disc in enumerate(self.discriminators):
+            if i > 0:
+                x_i = F.avg_pool1d(x_i, kernel_size=4, stride=2, padding=2)
+            feats, logits = disc(x_i)
+            results.append((feats, logits))
+        return results
+
+
 class Conv1dGMVAE(BaseGMVAE):
     def __init__(self, input_size=(128, 20), latent_dim=16, n_component=12,
                  pow_exp=0, logvar_trainable=False, is_featExtract=False):

@@ -2,6 +2,8 @@ import numpy as np
 import torch
 from torchvision.utils import make_grid
 from base import BaseTrainer
+from model.model import MultiScaleDiscriminator
+from model.loss import discriminator_loss, generator_adversarial_loss, feature_matching_loss
 
 
 class SpecVaeTrainer(BaseTrainer):
@@ -230,6 +232,168 @@ class RawAudioVaeTrainer(BaseTrainer):
             'val_loss':       total_val_loss  / len(self.valid_data_loader),
             'val_loss_recon': total_val_recon / len(self.valid_data_loader),
             'val_loss_kl':    total_val_kl    / len(self.valid_data_loader),
+        }
+
+
+class RawAudioVaeAdversarialTrainer(BaseTrainer):
+    """VAE-GAN trainer for RawAudioVAE + MultiScaleDiscriminator.
+
+    The discriminator and its optimizer are created internally.
+    Adversarial loss is phased in after `adv_start_epoch` so the VAE
+    can first learn a reasonable reconstruction before the disc is introduced.
+
+    Per-batch update order:
+        1. Forward VAE → y_hat
+        2. Update disc:  hinge loss on disc(x) vs disc(y_hat.detach())
+        3. Update VAE:   STFT recon + β·KL + λ_adv·gen_hinge + λ_fm·feat_match
+    """
+
+    def __init__(self, model, loss, metrics, optimizer, config,
+                 data_loader, valid_data_loader=None, lr_scheduler=None):
+        super().__init__(model, loss, metrics, optimizer, config)
+        self.data_loader       = data_loader
+        self.valid_data_loader = valid_data_loader
+        self.do_validation     = valid_data_loader is not None
+        self.lr_scheduler      = lr_scheduler
+        self.log_step          = int(np.sqrt(data_loader.batch_size))
+
+        # KL annealing (same schedule as non-adversarial trainer)
+        self.beta_max    = 0.05
+        self.beta_warmup = 100
+
+        # Adversarial hyper-parameters
+        self.adv_start_epoch = 50   # epoch at which disc training begins
+        self.lambda_adv      = 1.0  # weight on generator hinge loss
+        self.lambda_fm       = 10.0 # weight on feature-matching loss
+
+        # Discriminator (created here so it isn't exposed to train.py)
+        self.disc = MultiScaleDiscriminator().to(self.device)
+        self.disc_optimizer = torch.optim.Adam(
+            self.disc.parameters(), lr=3e-4, betas=(0.5, 0.9)
+        )
+
+    def _beta(self, epoch):
+        return min(epoch / self.beta_warmup, 1.0) * self.beta_max
+
+    def _train_epoch(self, epoch):
+        self.model.train()
+        self.disc.train()
+        use_adv = epoch >= self.adv_start_epoch
+
+        total_loss = total_recon = total_kl = 0
+        total_disc = total_gen_adv = total_fm = 0
+
+        for batch_idx, (data_idx, label, data) in enumerate(self.data_loader):
+            x = data.float().to(self.device)
+
+            # ── Forward VAE ──────────────────────────────────────────────
+            y_hat, mu, logvar, z = self.model(x)
+            loss_recon, loss_kl  = self.loss(x, y_hat, mu, logvar)
+
+            if use_adv:
+                # ── Update Discriminator ──────────────────────────────────
+                real_out   = self.disc(x)
+                fake_out_d = self.disc(y_hat.detach())
+                loss_disc  = discriminator_loss(real_out, fake_out_d)
+
+                self.disc_optimizer.zero_grad()
+                loss_disc.backward()
+                self.disc_optimizer.step()
+
+                # ── Adversarial + Feature-Matching losses for VAE ─────────
+                # Re-run disc on real (for FM reference) and fake (for gen loss)
+                real_out_fm  = self.disc(x)
+                fake_out_gen = self.disc(y_hat)          # gradients flow to VAE
+                loss_gen_adv = generator_adversarial_loss(fake_out_gen)
+                loss_fm      = feature_matching_loss(real_out_fm, fake_out_gen)
+
+            # ── Update VAE ───────────────────────────────────────────────
+            beta = self._beta(epoch)
+            if use_adv:
+                vae_loss = (loss_recon
+                            + beta * loss_kl
+                            + self.lambda_adv * loss_gen_adv
+                            + self.lambda_fm  * loss_fm)
+            else:
+                vae_loss = loss_recon + beta * loss_kl
+
+            self.optimizer.zero_grad()
+            vae_loss.backward()
+            self.optimizer.step()
+
+            # ── Logging ──────────────────────────────────────────────────
+            step = (epoch - 1) * len(self.data_loader) + batch_idx
+            self.writer.set_step(step)
+            self.writer.add_scalar('loss',       vae_loss.item())
+            self.writer.add_scalar('loss_recon', loss_recon.item())
+            self.writer.add_scalar('loss_kl',    loss_kl.item())
+            if use_adv:
+                self.writer.add_scalar('loss_disc',    loss_disc.item())
+                self.writer.add_scalar('loss_gen_adv', loss_gen_adv.item())
+                self.writer.add_scalar('loss_fm',      loss_fm.item())
+
+            total_loss  += vae_loss.item()
+            total_recon += loss_recon.item()
+            total_kl    += loss_kl.item()
+            if use_adv:
+                total_disc    += loss_disc.item()
+                total_gen_adv += loss_gen_adv.item()
+                total_fm      += loss_fm.item()
+
+            if batch_idx % self.log_step == 0:
+                self.logger.debug(
+                    'Train Epoch: {} [{}/{} ({:.0f}%)] Loss: {:.6f}{}'.format(
+                        epoch,
+                        batch_idx * self.data_loader.batch_size,
+                        self.data_loader.n_samples,
+                        100.0 * batch_idx / len(self.data_loader),
+                        vae_loss.item(),
+                        ' [adv ON]' if use_adv else ''))
+
+        n = len(self.data_loader)
+        log = {
+            'loss':       total_loss  / n,
+            'loss_recon': total_recon / n,
+            'loss_kl':    total_kl    / n,
+            'beta':       self._beta(epoch),
+        }
+        if use_adv:
+            log['loss_disc']    = total_disc    / n
+            log['loss_gen_adv'] = total_gen_adv / n
+            log['loss_fm']      = total_fm      / n
+
+        if self.do_validation:
+            log = {**log, **self._valid_epoch(epoch)}
+        if self.lr_scheduler is not None:
+            self.lr_scheduler.step()
+        return log
+
+    def _valid_epoch(self, epoch):
+        self.model.eval()
+        total_val_loss = total_val_recon = total_val_kl = 0
+
+        with torch.no_grad():
+            for batch_idx, (data_idx, label, data) in enumerate(self.valid_data_loader):
+                x = data.float().to(self.device)
+                y_hat, mu, logvar, z = self.model(x)
+                loss_recon, loss_kl  = self.loss(x, y_hat, mu, logvar)
+                loss = loss_recon + self.beta_max * loss_kl
+
+                self.writer.set_step(
+                    (epoch - 1) * len(self.valid_data_loader) + batch_idx, 'valid')
+                self.writer.add_scalar('loss', loss.item())
+                total_val_loss  += loss.item()
+                total_val_recon += loss_recon.item()
+                total_val_kl    += loss_kl.item()
+
+        for name, p in self.model.named_parameters():
+            self.writer.add_histogram(name, p, bins='auto')
+
+        n = len(self.valid_data_loader)
+        return {
+            'val_loss':       total_val_loss  / n,
+            'val_loss_recon': total_val_recon / n,
+            'val_loss_kl':    total_val_kl    / n,
         }
 
 
