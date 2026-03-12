@@ -1,4 +1,7 @@
 import os
+import torch
+import torchaudio
+import soundfile as sf
 from pathlib import Path
 from torch.utils.data import Dataset
 
@@ -122,7 +125,7 @@ class RawAudioDataset(Dataset):
                 split_dirs.append(os.path.join(data_dir, 'trainingdata'))
                 split_dirs.append(os.path.join(data_dir, 'testdata'))
 
-        items = []   # (label, filepath, chunk_start_sample_resampled)
+        items = []   # (label, filepath, chunk_start_sample_at_target_sr, file_sr)
         for split_dir in split_dirs:
             if not os.path.isdir(split_dir):
                 continue
@@ -135,12 +138,11 @@ class RawAudioDataset(Dataset):
                         continue
                     fpath = os.path.join(label_dir, fname)
                     try:
-                        import soundfile as sf
                         info = sf.info(fpath)
                         n_samples = int(info.frames * sr / info.samplerate)
                         n_chunks  = n_samples // chunk_size
                         for c in range(n_chunks):
-                            items.append((label, fpath, c * chunk_size))
+                            items.append((label, fpath, c * chunk_size, info.samplerate))
                     except Exception:
                         continue
 
@@ -154,17 +156,25 @@ class RawAudioDataset(Dataset):
         return len(self.items)
 
     def __getitem__(self, idx):
-        import torchaudio
-        label, path, start = self.items[idx]
-        y, file_sr = torchaudio.load(path)
-        if file_sr != self.sr:
+        label, path, start, file_sr = self.items[idx]
+
+        if file_sr == self.sr:
+            # Load only the needed chunk — avoids allocating the entire file.
+            y, _ = torchaudio.load(path, frame_offset=start, num_frames=self.chunk_size)
+        else:
+            # Resampling required: load full file, resample, then slice.
+            y, _ = torchaudio.load(path)
             y = torchaudio.functional.resample(y, file_sr, self.sr)
+            end = start + self.chunk_size
+            if end > y.shape[1]:
+                y = torch.nn.functional.pad(y, (0, end - y.shape[1]))
+            y = y[:, start:end]
+
         if y.shape[0] > 1:
             y = y.mean(0, keepdim=True)
-        end = start + self.chunk_size
-        if end > y.shape[1]:
-            y = torch.nn.functional.pad(y, (0, end - y.shape[1]))
-        return idx, label, y[:, start:end]   # (1, chunk_size)
+        if y.shape[1] < self.chunk_size:
+            y = torch.nn.functional.pad(y, (0, self.chunk_size - y.shape[1]))
+        return idx, label, y   # (1, chunk_size)
 
 
 if __name__ == '__main__':

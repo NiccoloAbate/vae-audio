@@ -225,8 +225,9 @@ class RawAudioVaeTrainer(BaseTrainer):
                 total_val_recon += loss_recon.item()
                 total_val_kl    += loss_kl.item()
 
-        for name, p in self.model.named_parameters():
-            self.writer.add_histogram(name, p, bins='auto')
+        if epoch % 5 == 0:
+            for name, p in self.model.named_parameters():
+                self.writer.add_histogram(name, p, bins='auto')
 
         return {
             'val_loss':       total_val_loss  / len(self.valid_data_loader),
@@ -301,11 +302,10 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
                 self.disc_optimizer.step()
 
                 # ── Adversarial + Feature-Matching losses for VAE ─────────
-                # Re-run disc on real (for FM reference) and fake (for gen loss)
-                real_out_fm  = self.disc(x)
+                # real_out tensor values survive backward(); reuse for FM.
                 fake_out_gen = self.disc(y_hat)          # gradients flow to VAE
                 loss_gen_adv = generator_adversarial_loss(fake_out_gen)
-                loss_fm      = feature_matching_loss(real_out_fm, fake_out_gen)
+                loss_fm      = feature_matching_loss(real_out, fake_out_gen)
 
             # ── Update VAE ───────────────────────────────────────────────
             beta = self._beta(epoch)
@@ -386,8 +386,9 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
                 total_val_recon += loss_recon.item()
                 total_val_kl    += loss_kl.item()
 
-        for name, p in self.model.named_parameters():
-            self.writer.add_histogram(name, p, bins='auto')
+        if epoch % 10 == 0:
+            for name, p in self.model.named_parameters():
+                self.writer.add_histogram(name, p, bins='auto')
 
         n = len(self.valid_data_loader)
         return {
