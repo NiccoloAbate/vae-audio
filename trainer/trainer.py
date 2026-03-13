@@ -265,7 +265,7 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
         # Adversarial hyper-parameters
         self.adv_start_epoch = 50   # epoch at which disc training begins
         self.lambda_adv      = 1.0  # weight on generator hinge loss
-        self.lambda_fm       = 10.0 # weight on feature-matching loss
+        self.lambda_fm       = 2.0  # weight on feature-matching loss
 
         # Discriminator (created here so it isn't exposed to train.py)
         self.disc = MultiScaleDiscriminator().to(self.device)
