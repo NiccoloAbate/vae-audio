@@ -109,7 +109,10 @@ dataset/
 
 # evaluation outputs
 eval/
-poster/
+poster/*
+!poster/poster.tex
+paper/*
+!paper/paper.tex
 
 # editor, os cache directory
 .vscode/
