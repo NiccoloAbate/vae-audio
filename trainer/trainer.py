@@ -2,7 +2,7 @@ import numpy as np
 import torch
 from torchvision.utils import make_grid
 from base import BaseTrainer
-from model.model import MultiScaleDiscriminator
+from model.model import MultiScaleSpecDiscriminator
 from model.loss import discriminator_loss, generator_adversarial_loss, feature_matching_loss
 
 
@@ -156,8 +156,10 @@ class RawAudioVaeTrainer(BaseTrainer):
         self.do_validation     = valid_data_loader is not None
         self.lr_scheduler      = lr_scheduler
         self.log_step          = int(np.sqrt(data_loader.batch_size))
-        self.beta_max      = 0.05  # final KL weight
-        self.beta_warmup   = 100   # epochs to ramp from 0 → beta_max
+        cfg = config['trainer']
+        self.beta_max    = cfg.get('beta_max',    0.05)
+        self.beta_warmup = cfg.get('beta_warmup', 100)
+        self.free_bits   = cfg.get('free_bits',   0.25)
 
     def _beta(self, epoch):
         """Linear KL warmup: 0 → beta_max over beta_warmup epochs."""
@@ -165,7 +167,7 @@ class RawAudioVaeTrainer(BaseTrainer):
 
     def _forward_and_computeLoss(self, x, epoch):
         y_hat, mu, logvar, z = self.model(x)
-        loss_recon, loss_kl  = self.loss(x, y_hat, mu, logvar)
+        loss_recon, loss_kl  = self.loss(x, y_hat, mu, logvar, free_bits=self.free_bits)
         loss = loss_recon + self._beta(epoch) * loss_kl
         return loss, loss_recon, loss_kl
 
@@ -258,17 +260,19 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
         self.lr_scheduler      = lr_scheduler
         self.log_step          = int(np.sqrt(data_loader.batch_size))
 
-        # KL annealing (same schedule as non-adversarial trainer)
-        self.beta_max    = 0.05
-        self.beta_warmup = 100
+        # KL annealing + free bits (configurable via config['trainer'])
+        cfg_adv = config['trainer']
+        self.beta_max    = cfg_adv.get('beta_max',    0.05)
+        self.beta_warmup = cfg_adv.get('beta_warmup', 100)
+        self.free_bits   = cfg_adv.get('free_bits',   0.25)
 
         # Adversarial hyper-parameters
-        self.adv_start_epoch = 50   # epoch at which disc training begins
-        self.lambda_adv      = 1.0  # weight on generator hinge loss
-        self.lambda_fm       = 2.0  # weight on feature-matching loss
+        self.adv_start_epoch = cfg_adv.get('adv_start_epoch', 50)
+        self.lambda_adv      = cfg_adv.get('lambda_adv', 1.0)
+        self.lambda_fm       = cfg_adv.get('lambda_fm', 2.0)
 
         # Discriminator (created here so it isn't exposed to train.py)
-        self.disc = MultiScaleDiscriminator().to(self.device)
+        self.disc = MultiScaleSpecDiscriminator().to(self.device)
         self.disc_optimizer = torch.optim.Adam(
             self.disc.parameters(), lr=3e-4, betas=(0.5, 0.9)
         )
@@ -289,7 +293,7 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
 
             # ── Forward VAE ──────────────────────────────────────────────
             y_hat, mu, logvar, z = self.model(x)
-            loss_recon, loss_kl  = self.loss(x, y_hat, mu, logvar)
+            loss_recon, loss_kl  = self.loss(x, y_hat, mu, logvar, free_bits=self.free_bits)
 
             if use_adv:
                 # ── Update Discriminator ──────────────────────────────────
@@ -376,7 +380,7 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
             for batch_idx, (data_idx, label, data) in enumerate(self.valid_data_loader):
                 x = data.float().to(self.device)
                 y_hat, mu, logvar, z = self.model(x)
-                loss_recon, loss_kl  = self.loss(x, y_hat, mu, logvar)
+                loss_recon, loss_kl  = self.loss(x, y_hat, mu, logvar, free_bits=self.free_bits)
                 loss = loss_recon + self.beta_max * loss_kl
 
                 self.writer.set_step(

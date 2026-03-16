@@ -14,10 +14,10 @@
     "data_loader": {
         "type": "RawAudioDataLoader",
         "args": {
-            "data_dir": ["dataset/myAudioDataset/audio"],
+            "data_dir": ["dataset/medley-solos/organized"],
             "sr": 22050,
             "chunk_size": 16384,
-            "batch_size": 64,
+            "batch_size": 32,
             "shuffle": true,
             "validation_split": 0.1,
             "num_workers": 4,
@@ -58,11 +58,11 @@
 
         "tensorboardX": true,
 
-        "beta_max": 0.02,
-        "beta_warmup": 200,
-        "free_bits": 0.1,
+        "beta_max": 0.05,
+        "beta_warmup": 100,
+        "free_bits": 0.25,
 
-        "adv_start_epoch": 150,
+        "adv_start_epoch": 200,
         "lambda_adv": 1.0,
         "lambda_fm": 2.0
     }

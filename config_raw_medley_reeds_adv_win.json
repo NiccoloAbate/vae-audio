@@ -14,7 +14,7 @@
     "data_loader": {
         "type": "RawAudioDataLoader",
         "args": {
-            "data_dir": ["dataset/myAudioDataset/audio"],
+            "data_dir": ["dataset/medley-solos/organized_reeds"],
             "sr": 22050,
             "chunk_size": 16384,
             "batch_size": 64,
@@ -62,8 +62,8 @@
         "beta_warmup": 200,
         "free_bits": 0.1,
 
-        "adv_start_epoch": 150,
-        "lambda_adv": 1.0,
+        "adv_start_epoch": 250,
+        "lambda_adv": 0.2,
         "lambda_fm": 2.0
     }
 }

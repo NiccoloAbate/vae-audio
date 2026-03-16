@@ -21,7 +21,7 @@ METADATA      = Path("dataset/medley-solos/metadata.csv")
 AUDIO_DIR     = Path("dataset/medley-solos/Medley-solos-DB")
 OUT_DIR       = Path("dataset/medley-solos/organized_reeds/trainingdata")
 INSTRUMENTS   = {"clarinet", "tenor saxophone"}
-MAX_PER_CLASS = 477   # match tenor sax total
+MAX_PER_CLASS = 9999  # use all available clips per class
 SEED          = 42
 
 random.seed(SEED)

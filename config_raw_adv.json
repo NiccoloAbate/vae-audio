@@ -56,6 +56,10 @@
         "monitor": "min val_loss",
         "early_stop": 1000,
 
-        "tensorboardX": true
+        "tensorboardX": true,
+
+        "adv_start_epoch": 150,
+        "lambda_adv": 1.0,
+        "lambda_fm": 2.0
     }
 }

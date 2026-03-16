@@ -56,6 +56,10 @@
         "monitor": "min val_loss",
         "early_stop": 1000,
 
-        "tensorboardX": true
+        "tensorboardX": true,
+
+        "beta_max": 0.05,
+        "beta_warmup": 100,
+        "free_bits": 0.25
     }
 }

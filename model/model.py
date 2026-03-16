@@ -334,6 +334,75 @@ class MultiScaleDiscriminator(nn.Module):
         return results
 
 
+class SpectrogramDiscriminatorBlock(nn.Module):
+    """Single-scale spectrogram discriminator.
+
+    Operates on a log-magnitude STFT (B, 1, F, T) using 2-D convolutions.
+    Returns (feature_maps, logits) — same interface as WaveformDiscriminatorBlock.
+    """
+    def __init__(self):
+        super().__init__()
+        self.convs = nn.ModuleList([
+            # stride=(freq, time) — downsample freq quickly to avoid huge feature maps
+            nn.utils.weight_norm(nn.Conv2d(1,   32,  (3, 9), stride=(2, 1), padding=(1, 4))),
+            nn.utils.weight_norm(nn.Conv2d(32,  64,  (3, 9), stride=(2, 2), padding=(1, 4))),
+            nn.utils.weight_norm(nn.Conv2d(64,  128, (3, 9), stride=(2, 2), padding=(1, 4))),
+            nn.utils.weight_norm(nn.Conv2d(128, 256, (3, 3), stride=(1, 1), padding=(1, 1))),
+            nn.utils.weight_norm(nn.Conv2d(256, 256, (3, 3), stride=(1, 1), padding=(1, 1))),
+        ])
+        self.output_conv = nn.utils.weight_norm(
+            nn.Conv2d(256, 1, (3, 3), stride=(1, 1), padding=(1, 1))
+        )
+
+    def forward(self, spec):
+        # spec: (B, 1, F, T_frames)
+        features, x = [], spec
+        for conv in self.convs:
+            x = F.leaky_relu(conv(x), 0.2)
+            features.append(x)
+        logits = self.output_conv(x)   # (B, 1, F', T')
+        features.append(logits)
+        return features, logits
+
+
+class MultiScaleSpecDiscriminator(nn.Module):
+    """Multi-scale spectrogram discriminator (RAVE-style).
+
+    Computes log-magnitude STFTs at multiple resolutions and runs a
+    SpectrogramDiscriminatorBlock on each. Because it operates on magnitude
+    spectrograms rather than raw waveforms, it is phase-agnostic and compatible
+    with STFT-based reconstruction losses.
+
+    forward() returns a list of (feature_maps, logits) — one per scale,
+    matching the MultiScaleDiscriminator interface exactly.
+    """
+    def __init__(self,
+                 fft_sizes=(2048, 1024, 512),
+                 hop_sizes=(512,  256,  128)):
+        super().__init__()
+        self.fft_sizes = fft_sizes
+        self.hop_sizes = hop_sizes
+        self.discriminators = nn.ModuleList([
+            SpectrogramDiscriminatorBlock() for _ in fft_sizes
+        ])
+
+    def _log_mag_spec(self, x, n_fft, hop):
+        """Compute log-magnitude STFT from waveform (B, 1, T) → (B, 1, F, T_frames)."""
+        x_sq = x.squeeze(1)                                         # (B, T)
+        win  = torch.hann_window(n_fft, device=x.device)
+        S    = torch.stft(x_sq, n_fft, hop, n_fft, win, return_complex=True)
+        mag  = torch.log(S.abs() + 1e-5)                            # (B, F, T_frames)
+        return mag.unsqueeze(1)                                      # (B, 1, F, T_frames)
+
+    def forward(self, x):
+        results = []
+        for disc, n_fft, hop in zip(self.discriminators, self.fft_sizes, self.hop_sizes):
+            spec = self._log_mag_spec(x, n_fft, hop)
+            feats, logits = disc(spec)
+            results.append((feats, logits))
+        return results
+
+
 class Conv1dGMVAE(BaseGMVAE):
     def __init__(self, input_size=(128, 20), latent_dim=16, n_component=12,
                  pow_exp=0, logvar_trainable=False, is_featExtract=False):

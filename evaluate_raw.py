@@ -46,7 +46,7 @@ def get_device():
 
 def load_model_and_data(config, resume, device):
     dl_args = dict(config['data_loader']['args'])
-    dl_args.update({'validation_split': 0.0, 'shuffle': False, 'subset': 'test'})
+    dl_args.update({'validation_split': 0.0, 'shuffle': False, 'subset': None})
     data_loader = getattr(module_data, config['data_loader']['type'])(**dl_args)
 
     model = config.initialize('arch', module_arch)
@@ -88,7 +88,7 @@ def collect_latents_and_recons(model, data_loader, device, max_per_class=64, see
             rec_list.append(y_hat.squeeze(1).cpu())
 
             for b, (idx, lbl) in enumerate(zip(data_idx.tolist(), list(label))):
-                _, fpath, chunk_start = dataset.items[idx]
+                _, fpath, chunk_start, *_ = dataset.items[idx]
                 fnames_out.append(os.path.basename(fpath))
                 cidx_out.append(chunk_start // dataset.chunk_size)
                 labels_out.append(lbl)
@@ -331,7 +331,7 @@ def save_audio_samples(model, dataset, labels, filenames, chunk_indices,
 
     # Map basename → full wav path (one entry per unique file)
     path_map = {}
-    for _, fpath, _ in dataset.items:
+    for _, fpath, *_ in dataset.items:
         path_map.setdefault(os.path.basename(fpath), fpath)
 
     seen, row = set(), 0
@@ -369,7 +369,7 @@ def plot_full_file_spectrograms(model, dataset, labels, filenames, chunk_indices
                                 chunk_size=16384, n_fft=1024, hop=256):
     """For each selected file, plot the full-file log-STFT input vs reconstruction."""
     path_map = {}
-    for _, fpath, _ in dataset.items:
+    for _, fpath, *_ in dataset.items:
         path_map.setdefault(os.path.basename(fpath), fpath)
 
     seen, row = set(), 0
@@ -457,7 +457,7 @@ def plot_interpolations(model, dataset, filenames, chunk_indices, labels,
     """
     # Build reverse map: (basename, chunk_idx) → dataset item index
     fname_cidx_to_item = {}
-    for item_idx, (lbl, fpath, start) in enumerate(dataset.items):
+    for item_idx, (lbl, fpath, start, *_) in enumerate(dataset.items):
         key = (os.path.basename(fpath), start // dataset.chunk_size)
         fname_cidx_to_item.setdefault(key, item_idx)
 
