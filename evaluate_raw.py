@@ -259,21 +259,62 @@ def plot_latent_pca(mu, labels, out_path):
     print(f'Saved  {out_path}')
 
 
-def plot_kl_per_dim(mu, logvar, out_path):
-    """KL divergence per latent dimension (averaged over the test set)."""
+def plot_kl_per_dim(mu, logvar, out_path, free_bits=None):
+    """KL divergence per latent dimension (averaged over the test set).
+
+    Bars are coloured by activity: green = active (KL > free_bits threshold),
+    red = collapsed (KL <= free_bits threshold).  A threshold line is drawn
+    if free_bits is provided.  Summary stats are printed to stdout.
+    """
     kl      = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())  # (N, D)
     kl_mean = kl.mean(0).numpy()                                # (D,)
 
-    fig, ax = plt.subplots(figsize=(10, 3))
-    ax.bar(np.arange(len(kl_mean)), kl_mean, color='steelblue')
-    ax.axhline(0, color='k', linewidth=0.5)
-    ax.set_xlabel('Latent dimension')
-    ax.set_ylabel('Mean KL divergence')
-    ax.set_title('KL per latent dimension  (dims near 0 = "collapsed" / unused)')
+    threshold = free_bits if free_bits is not None else 0.0
+    colors    = ['#2ecc71' if v > threshold else '#e74c3c' for v in kl_mean]
+
+    n_active   = int((kl_mean > threshold).sum())
+    n_dims     = len(kl_mean)
+    total_kl   = kl_mean.sum()
+    active_kl  = kl_mean[kl_mean > threshold]
+    mean_active = active_kl.mean() if len(active_kl) > 0 else 0.0
+
+    # Sort indices by KL descending for the second panel
+    order = np.argsort(kl_mean)[::-1]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 3.5))
+
+    # Panel 1: dims in original order
+    ax1.bar(np.arange(n_dims), kl_mean, color=colors)
+    if free_bits is not None:
+        ax1.axhline(free_bits, color='k', linewidth=1.0, linestyle='--',
+                    label=f'free_bits = {free_bits}')
+        ax1.legend(fontsize=8)
+    ax1.axhline(0, color='k', linewidth=0.5)
+    ax1.set_xlabel('Latent dimension (original order)')
+    ax1.set_ylabel('Mean KL')
+    ax1.set_title(f'KL per dim  —  {n_active}/{n_dims} active  '
+                  f'(total KL={total_kl:.2f}, mean active={mean_active:.2f})')
+
+    # Panel 2: dims sorted by KL descending
+    ax2.bar(np.arange(n_dims), kl_mean[order],
+            color=[colors[i] for i in order])
+    if free_bits is not None:
+        ax2.axhline(free_bits, color='k', linewidth=1.0, linestyle='--')
+    ax2.axhline(0, color='k', linewidth=0.5)
+    ax2.set_xlabel('Rank (sorted by KL, descending)')
+    ax2.set_ylabel('Mean KL')
+    ax2.set_title('Sorted by activity')
+
     fig.tight_layout()
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
+
     print(f'Saved  {out_path}')
+    print(f'  KL per dim: {n_active}/{n_dims} active dims  |  '
+          f'total KL={total_kl:.3f}  |  mean active={mean_active:.3f}')
+    top5 = order[:5]
+    print(f'  Top-5 dims by KL: ' +
+          ', '.join(f'dim{i}={kl_mean[i]:.3f}' for i in top5))
 
 
 def reconstruct_full_file_raw(model, wav_path, device, sr=22050,
@@ -623,7 +664,9 @@ def main(config, resume, n_samples, out_dir):
 
     plot_latent_pca(mu, labels, os.path.join(out_dir, 'latent_pca.png'))
 
-    plot_kl_per_dim(mu, logvar, os.path.join(out_dir, 'kl_per_dim.png'))
+    free_bits = config['trainer'].get('free_bits', None)
+    plot_kl_per_dim(mu, logvar, os.path.join(out_dir, 'kl_per_dim.png'),
+                    free_bits=free_bits)
 
     save_audio_samples(model, data_loader.dataset, labels, filenames, chunk_indices,
                        sample_indices, os.path.join(out_dir, 'audio'), device,
