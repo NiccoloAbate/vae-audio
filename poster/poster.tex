@@ -114,7 +114,8 @@
         \item \textbf{SpecVAE} - spectrogram-domain baseline, 29 files
         \item \textbf{RawAudioVAE (small)} - raw waveform, 29 files
         \item \textbf{RawAudioVAE (ESC-50)} - 2000 clips, 50 classes
-        \item \textbf{RawAudioVAE (Medley-Solos-DB)} - 21k clips, 8 tonal instruments \textit{(in progress)}
+        \item \textbf{RawAudioVAE (Medley-Solos-DB)} - 21k clips, 8 tonal instruments
+        \item \textbf{+ Adversarial training} - multi-scale discriminator + feature-matching loss for perceptual quality
     \end{itemize}
 }
 
@@ -145,12 +146,12 @@
 
     \medskip
     \textbf{Slerp} (spherical linear interpolation) from $t{=}0$ to $t{=}1$ between two files' latent sequences.
-    Spectrograms evolve smoothly, indicating perceptual coherence in the learned latent space.
+    Spectrograms evolve smoothly, indicating perceptual coherence in the latent space.
 
     \medskip
     \vspace{2mm}
     \textbf{Mean + offset:} decomposes $z_i = \mu_{\text{global}} + \delta_i$;
-    slerp the mean, lerp the offsets - separating timbral character from temporal structure.
+    slerp the mean, lerp the offsets.
 }
 
 
@@ -200,7 +201,7 @@
     \end{minipage}\hfill
     \begin{minipage}{0.48\linewidth}
         \centering
-        \includegraphics[width=\linewidth]{rawvae_small/spectrograms_edit.png}\\[-3mm]
+        \includegraphics[width=\linewidth]{rawvae_medley_ep250/spectrograms_edit.png}\\[-3mm]
         {\small\textcolor{subtletxt}{\textbf{RawAudioVAE} (Small)}}
     \end{minipage}
     \par
@@ -261,7 +262,7 @@
         Loss      & MSE mel & MR-STFT & MR-STFT & MR-STFT \\
         $\beta$ warmup & --- & $0{\to}0.05$ & $0{\to}0.05$ & $0{\to}0.05$ \\
         Free bits & ---     & $\lambda{=}0.25$ & $\lambda{=}0.25$ & $\lambda{=}0.25$ \\
-        Best val  & ---     & 1.497 (675) & 1.244 (350) & \textit{TBD} \\
+        Best val  & ---     & 1.497 (675) & 1.244 (350) & 1.670 (405) \\
         \bottomrule
     \end{tabular}
     \par\vspace{-2mm}
@@ -291,20 +292,16 @@
 \block{9.~Conclusions \& Future Work}{
     \textcolor{accentblue}{\textbf{What worked:}}
     \begin{itemize}[leftmargin=1em, noitemsep, topsep=1pt]
-        \item RawAudioVAE with multi-resolution STFT loss trains stably and
-        improves over SpecVAE baseline.
+        \item RawAudioVAE improves over SpecVAE baseline.
         \item Latent space enables smooth perceptual morphing.
-        %\item Larger dataset (ESC-50) generalizes better.
-        %\item Free bits + $\beta$ warmup prevents posterior collapse
+        % \item Medley-Solos-DB generalizes across 8 tonal instruments (best val 1.670).
+        \item Adversarial training (multi-scale disc + feature-matching loss) shows noticeably improved perceptual quality.
     \end{itemize}
 
     \medskip
-    \textcolor{accentorange}{\textbf{Future work:}}
+    \textcolor{stanfordgray}{\textbf{Future work:}}
     \begin{itemize}[leftmargin=1em, noitemsep, topsep=1pt]
-        \item Adversarial / feature-matching loss for perceptual quality
-        \item Larger dataset, more latent dims, longer training time
-        %\item Larger latent dim (64+) for diverse datasets
-        %\item Streaming / real-time inference
+        \item Larger latent dims, longer training, real-time inference
     \end{itemize}
 
     \medskip
