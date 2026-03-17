@@ -21,7 +21,7 @@ This project explores Variational Autoencoders (VAEs) as a framework for audio s
 
 Out-of-distribution sounds (percussion and other tonal instruments) encoded into the Medley-Solos-DB VAE latent space and interpolated between using slerp.
 
-<video src="videos/demo_medley.mov" controls width="100%"></video>
+<video src="videos/demo_medley.mp4" controls width="100%"></video>
 
 ---
 
