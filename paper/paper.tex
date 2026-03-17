@@ -24,8 +24,8 @@
 % ── Metadata ────────────────────────────────────────────
 \title{\textbf{Exploring Variational Autoencoders for\\Audio Synthesis and Timbre Transfer}}
 \author{Niccolo Abate\\
-    EE\,269 --- Signal Processing of Music and Audio\\
-    CCRMA, Stanford University\\
+    EE\,269 --- Signal Processing and Quantization for Machine Learning \\
+    Stanford University\\
     \texttt{nabate@stanford.edu}}
 \date{March 2026}
 
@@ -45,7 +45,7 @@
     on reconstruction quality and latent space structure, and introduce an
     adversarial extension using a multi-scale spectrogram discriminator with
     feature-matching loss.
-    \TODO{Finalize once results are complete.}
+    % \TODO{Finalize once results are complete.}
 \end{abstract}
 
 % ══════════════════════════════════════════════════════════
@@ -94,7 +94,7 @@ scaling, adversarial extension, and demo --- is original work.
 \subsection{Variational Autoencoders}
 
 A Variational Autoencoder~\cite{kingma2022autoencodingvariationalbayes} is a latent variable generative
-model that asuumes data $x$ arises from a latent variable $z$ via a
+model that assumes data $x$ arises from a latent variable $z$ via a
 learned decoder $p_\theta(x \mid z)$, with prior $p(z) = \mathcal{N}(0, I)$.
 Direct maximum-likelihood training requires marginalizing over $z$, which is
 intractable for deep networks.
@@ -122,7 +122,7 @@ Weighting the KL term with $\beta>1$~\cite{higgins2017betavae} encourages disent
 but can induce \textit{posterior collapse}, where $q_\phi(z|x)\approx p(z)$
 and the latent variables carry little information.
 This failure mode is common in audio VAEs due to the high dimensionality of the reconstruction task.
-We mitigate collapse with (1) $\beta$ \textit{warmup}, annealing $\beta$ from 0 to 0.05 over the first 100-200 epochs,
+We instead mitigate collapse with (1) $\beta$ \textit{warmup}, annealing $\beta$ from 0 to 0.05 over the first 100 epochs,
 and (2) \textit{free bits}~\cite{kingma2017improvingvariationalinferenceinverse}, enforcing a minimum KL contribution per latent dimension $\lambda=0.25$.
 
 \subsection{Audio Synthesis with VAEs}
@@ -147,9 +147,8 @@ audio codecs with temporal latent representations, achieving high
 perceptual quality at low bitrates.
 
 \paragraph{RAVE.}
-The work most closely related to ours is RAVE~\cite{caillon2021ravevariationalautoencoderfast}
-(Real-time Audio Variational autoEncoder).
-RAVE employs a strided convolutional encoder–decoder with residual
+RAVE (Real-time Audio Variational autoEncoder)~\cite{caillon2021ravevariationalautoencoderfast}
+employs a strided convolutional encoder–decoder with residual
 blocks and is trained in two stages: VAE pretraining followed by
 adversarial fine-tuning with multi-scale discriminators.
 It further enables real-time synthesis by pruning inactive latent dimensions
@@ -230,8 +229,6 @@ reconstructed spectrogram that is inverted to audio via Griffin-Lim.
 The training loss is MSE on the mel spectrogram plus a $\beta$-weighted
 KL divergence term.
 
-\TODO{Expand with exact layer counts, channel widths from config.}
-
 \subsection{RawAudioVAE}
 
 RawAudioVAE takes raw waveform chunks of shape $(1, 16384)$ at
@@ -259,15 +256,15 @@ The total loss combines a multi-resolution STFT reconstruction term with a KL re
     \label{eq:loss}
 \end{equation}
 The STFT loss averages spectral convergence and log-magnitude L1 over FFT sizes $\{2048, 1024, 512, 256\}$.
-To prevent posterior collapse, $\beta$ is linearly annealed from 0 to its target value over the first 100-200 epochs.
-Additionally, free bits~\cite{kingma2017improvingvariationalinferenceinverse} with programmable threshold exempt latent dimensions
+To prevent posterior collapse, $\beta$ is linearly annealed over the first 100-200 epochs.
+Additionally, free bits~\cite{kingma2017improvingvariationalinferenceinverse} exempt latent dimensions
 whose KL is below the threshold from contributing to the loss,
 allowing each dimension to freely encode a minimum amount of information.
 
 \subsection{Adversarial Extension}
 
 To improve perceptual quality beyond what the STFT loss captures,
-we augment training with a multi-scale spectrogram discriminator.
+we test the use of a multi-scale spectrogram discriminator.
 
 \paragraph{Discriminator.}
 The \textit{MultiScaleSpecDiscriminator} computes log-magnitude STFTs
@@ -295,7 +292,7 @@ $\mathcal{L}_{\text{FM}}$ between discriminator intermediate activations:
         + \lambda_{\text{FM}} \mathcal{L}_{\text{FM}}
     \label{eq:adv_loss}
 \end{equation}
-Adversarial training is phased in after 100-200 epochs, once the VAE has
+Adversarial training is phased in after the VAE has
 established a stable baseline.
 
 % ══════════════════════════════════════════════════════════
@@ -304,7 +301,7 @@ established a stable baseline.
 
 \begin{table}[h]
     \centering
-    \caption{Training configurations across all experiments.}
+    \caption{Training configurations.}
     \label{tab:training}
     \renewcommand{\arraystretch}{1.15}
     \footnotesize
@@ -333,9 +330,9 @@ clips spanning 50 classes, offering diversity well beyond the small set.
 of 8 tonal instruments, chosen to stress-test reconstruction of harmonic
 audio.
 
-All models are trained with Adam (lr=$3{\times}10^{-4}$, amsgrad) and a StepLR scheduler
+All models use Adam (lr=$3{\times}10^{-4}$, amsgrad) with a StepLR scheduler
 (step 200, $\gamma=0.5$). The small and ESC-50 runs were trained on a
-MacBook M4 Pro; Medley and adversarial runs on an RTX\,4070.
+MacBook M4 Pro; Medley and adversarial on an RTX\,4070.
 
 % ══════════════════════════════════════════════════════════
 \section{Results}
@@ -356,53 +353,55 @@ MacBook M4 Pro; Medley and adversarial runs on an RTX\,4070.
         \includegraphics[width=\linewidth]{rawvae_medley_ep250/spectrograms_edit.png}
         \caption{RawAudioVAE (Medley-Solos-DB)}
     \end{subfigure}
-    \caption{Spectrogram reconstructions. Each panel: original (top),
-    reconstructed (bottom).}
+    \caption{Spectrogram reconstructions.}
     \label{fig:recon}
 \end{figure}
 
-\TODO{Qualitative discussion of Figure~\ref{fig:recon}: where SpecVAE
-blurs fine structure, how RawAudioVAE preserves it, especially in
-tonal regions. Note the improvement from small to Medley dataset.}
+Figure~\ref{fig:recon} compares spectrogram reconstructions from SpecVAE
+and RawAudioVAE (Medley-Solos-DB).
+SpecVAE reconstructions are noticeably blurred, losing fine spectral
+structure — a consequence of operating on mel spectrograms and inverting
+via Griffin-Lim.
+RawAudioVAE reconstructions contain substantially more detail overall,
+preserving harmonic partials and envelope shape more faithfully.
+
+On the Medley-Solos-DB dataset, reconstruction quality varies by
+instrument. Instruments with stable, well-defined harmonic content ---
+such as tenor saxophone --- are reconstructed convincingly, with clear
+partials and plausible envelope. Instruments with more complex or
+transient-heavy spectra, such as piano, fare worse: the model captures
+the general timbral character but loses fine detail.
+A characteristic limitation of the non-adversarial model is a diffuse,
+electronic-noise quality present in many reconstructions --- an
+artifact of optimizing a spectral loss without a perceptual judge.
+Adversarial training noticeably reduces this, producing cleaner outputs,
+though it remains an area for further improvement.
 
 \subsection{Training Dynamics}
 
 \begin{figure}[!t]
     \centering
     \includegraphics[width=\linewidth]{rawvae_small/training_curves.png}
-    \caption{Validation reconstruction and KL loss (RawAudioVAE, small
-    dataset, 1000 epochs). The $\beta$ warmup window (epochs 0--100) is
-    visible as a plateau in reconstruction loss while KL rises gradually.}
+    \caption{Validation loss curves (RawAudioVAE, small dataset, 1000 epochs).
+    During the $\beta$ warmup (epochs 0--100), reconstruction loss drops steeply
+    with no KL penalty; as $\beta$ is introduced, a brief rise in total loss
+    is visible before trending downward again.}
     \label{fig:curves}
 \end{figure}
 
 Figure~\ref{fig:curves} shows the training dynamics on the small dataset.
-The $\beta$ warmup has a clear and important effect: holding $\beta = 0$
-for the first 100 epochs allows the decoder to learn a strong reconstruction
-prior before any KL pressure is applied.
-Introducing KL too early causes the encoder to collapse toward the prior
-immediately, before the decoder has learned to use latent information —
-a failure mode we observed in early ablations.
-With warmup, the reconstruction loss continues to fall steadily through
-the full 1000-epoch run, reaching a best validation loss of 1.497 at epoch
-675.
+The $\beta$ warmup (first 100 epochs) allows the decoder
+to establish a reconstruction prior before
+KL pressure is applied, avoiding posterior collapse.
 
 \paragraph{Effect of dataset scale.}
 The most striking result across all runs is the outsized effect of dataset
-size.
-The ESC-50 model (2{,}000 clips, 50 classes) reaches a validation loss
-of 1.907 by epoch 54 — surpassing the small-dataset best after 675 epochs
-— and ultimately achieves 1.763 at epoch 123.
-This is not merely a consequence of more gradient steps: the ESC-50 model
-has seen a far more diverse distribution of audio, forcing the encoder
-to learn more general features rather than overfitting the two-class small
-dataset.
-The Medley-Solos-DB model (21{,}571 clips, 8 tonal instrument classes)
-achieves a best validation loss of 1.670 at epoch 405.
-The higher loss relative to ESC-50 reflects the greater intra-class
-diversity of tonal instrument sounds, which are more demanding to
-reconstruct faithfully than the broad, often percussive environmental
-sounds in ESC-50.
+size. Larger, more diverse datasets converge faster and to lower validation
+loss, suggesting the encoder learns more general features rather than
+overfitting a narrow distribution. The higher loss on Medley-Solos-DB
+relative to ESC-50 likely reflects the greater demands of reconstructing
+tonal harmonic audio compared to the more percussive environmental sounds
+in ESC-50 (see Table~\ref{tab:training}).
 
 \subsection{Latent Space Structure}
 
@@ -418,7 +417,7 @@ sounds in ESC-50.
         \includegraphics[width=\linewidth]{rawvae_esc50_ep400/latent_pca.png}
         \caption{PCA scatter (color = class)}
     \end{subfigure}
-    \caption{Latent space analysis on ESC-50 (epoch 400). Class separation
+    \caption{Latent space analysis on ESC-50 (epoch 400). Meaningful class separation
     emerges without using class labels during training.}
     \label{fig:latent}
 \end{figure}
@@ -426,25 +425,23 @@ sounds in ESC-50.
 \paragraph{Active dimensions.}
 Figure~\ref{fig:latent}(a) shows the average KL per latent dimension
 for the ESC-50 model.
-The free bits threshold ($\lambda = 0.25$, dashed line) is visible as
-a floor: dimensions whose KL falls below it are not penalized, so the
-model is free to use them.
-A subset of dimensions carry substantially higher KL than the rest,
-indicating that the model has allocated meaningful information to those
-dimensions and allowed the remaining ones to stay near the prior.
-This selective activation is a sign that the latent space is not
-wasted — dimensions that are not needed for reconstruction are
-effectively pruned, giving a compact, interpretable representation.
+A subset of dimensions carry meaningfully higher KL than the rest,
+indicating selective activation: the model allocates information where
+needed and allows remaining dimensions to stay near the prior.
+By contrast, the Medley-Solos-DB model shows a more spiky distribution
+with fewer dominant dimensions, suggesting that the more structured,
+tonal nature of instrument audio can be captured by a smaller set of
+latent directions.
 
 \paragraph{Unsupervised class structure.}
 Figure~\ref{fig:latent}(b) shows a PCA projection of the latent means
 $\mu$ for the ESC-50 validation set, colored by class label.
 Notably, class labels were never used during training.
-Despite this, the first two principal components reveal substantial
+Despite this, the first two principal components reveal meaningful
 separation between several sound categories.
-Acoustically similar classes (e.g., different engine sounds) tend to
-cluster near one another, while perceptually distinct classes (e.g.,
-animal sounds vs.\ mechanical noise) occupy well-separated regions.
+Acoustically similar classes tend to
+cluster near one another, while perceptually distinct classes
+seem to occupy well-separated regions.
 This suggests that the multi-resolution STFT loss is a strong enough
 perceptual signal to drive the encoder toward timbral organization
 without explicit supervision, and that the resulting latent space
@@ -469,104 +466,72 @@ latent sequences $\{z_i\}$ produced by encoding a full audio file
 chunk by chunk.
 
 \paragraph{Per-chunk slerp.}
-The simplest mode interpolates each latent frame independently using
-spherical linear interpolation (slerp).
-For two latent sequences $\{z_i^A\}$ and $\{z_i^B\}$ and interpolation
-parameter $t \in [0, 1]$:
+Each latent frame is interpolated independently using spherical linear
+interpolation (slerp)~\cite{shoemake1985}, which traverses the hypersphere
+at constant angular velocity, avoiding the magnitude collapse of linear
+interpolation near $t{=}0.5$:
 \begin{equation}
-    z_i(t) = \text{slerp}(z_i^A,\, z_i^B,\, t)
-            = \frac{\sin((1-t)\,\Omega)}{\sin\Omega}\, z_i^A
-            + \frac{\sin(t\,\Omega)}{\sin\Omega}\, z_i^B
+    z_i(t) = \frac{\sin((1-t)\,\Omega)}{\sin\Omega}\, z_i^A
+            + \frac{\sin(t\,\Omega)}{\sin\Omega}\, z_i^B, \quad
+    \Omega = \arccos\!\left(\tfrac{z_i^A \cdot z_i^B}{\|z_i^A\|\|z_i^B\|}\right).
     \label{eq:slerp}
 \end{equation}
-where $\Omega = \arccos\!\left(\frac{z_i^A \cdot z_i^B}{\|z_i^A\|\|z_i^B\|}\right)$.
-Slerp is preferred over linear interpolation because it traverses the
-surface of the hypersphere at constant angular velocity, avoiding the
-magnitude collapse that linear interpolation produces near $t = 0.5$.
 
 \paragraph{Mean + offset mode.}
-Per-chunk slerp morphs both the global timbral character and the local
-temporal structure simultaneously, which can produce perceptually
-confusing results when source files have different rhythmic content.
-To decouple these two aspects we introduce a mean + offset decomposition.
-Each file's latent sequence is split into a global mean
-$\bar{z} = \frac{1}{N}\sum_i z_i \in \mathbb{R}^{D \times T_{\text{lat}}}$
-and per-chunk offsets $\delta_i = z_i - \bar{z}$.
-Interpolation then morphs only the global means via slerp, while the
-offsets are blended linearly:
+To decouple timbral identity from temporal structure, each latent sequence
+is split into a global mean $\bar{z}$ and per-chunk offsets
+$\delta_i = z_i - \bar{z}$. Only the means are slerped; offsets are blended linearly:
 \begin{equation}
     z_i(t) = \text{slerp}(\bar{z}^A, \bar{z}^B, t)
             + (1-t)\,\delta_i^A + t\,\delta_i^B.
     \label{eq:meanoffset}
 \end{equation}
-This separates \textit{timbral identity} --- encoded in the global mean,
-which reflects the characteristic spectral shape of the source --- from
-\textit{temporal structure}, which is preserved in the offsets throughout
-the morph.
 
 Figure~\ref{fig:interp} illustrates per-chunk slerp between two files.
 The spectrograms evolve smoothly without discontinuities, with the
 source's spectral content gradually replaced by the target's.
-The transition is perceptually coherent rather than a crossfade in
-waveform space, which would produce comb-filtering artifacts at the
-sample level.
+Unlike a waveform crossfade, which simply mixes two signals without
+regard for perceptual structure, latent interpolation traverses a learned
+space where intermediate points decode to acoustically plausible sounds
+that genuinely blend the timbral character of the two sources.
 
 \subsection{Adversarial Training}
 
-Adversarial training is still in progress on the Medley-Solos-DB dataset,
-with the discriminator introduced at epoch 150 after a pure VAE warmup
-phase. Early results are promising but reveal a characteristic tension
-inherent to VAE-GAN training.
+Evaluation of adversarial training on the Medley-Solos-DB dataset is ongoing.
+Early results are promising but reveal a characteristic tension inherent to VAE-GAN training.
 
 \paragraph{Perceptual quality.}
-The most immediate effect of adversarial training is a noticeable
-improvement in perceived audio quality.
-Reconstructions exhibit sharper transients, better-defined harmonic
-partials, and less of the spectral smearing that the STFT reconstruction
-loss alone tends to produce.
-This is consistent with the role of the feature-matching loss: by
-encouraging the decoder to match the discriminator's intermediate
-activations on real audio, it receives a dense perceptual supervision
-signal that the hand-crafted spectral convergence and log-magnitude
-terms do not provide.
+The most immediate effect of adversarial training is an improvement in perceived audio quality.
+Reconstructions exhibit sharper transients, clearer harmonic partials,
+and reduced spectral smearing compared to STFT-only reconstruction.
+This aligns with the role of the feature-matching loss:
+by encouraging the decoder to match intermediate activations of the discriminator on real audio,
+it receives a learned perceptual supervision pressure beyond the spectral convergence and log-magnitude terms.
 
-\paragraph{Reconstruction fidelity trade-off.}
-The improvement in perceived quality comes with a measurable increase
-in validation reconstruction loss.
-This is a well-known characteristic of adversarial audio models: the
-generator is partly optimized to produce audio that sounds plausible
-rather than audio that is spectrally close to the input.
-In practice this manifests as outputs that sound clean and musical
-but are a less faithful reproduction of the specific input file.
-For the timbre transfer use case this trade-off is acceptable — and
-may even be desirable — but it is worth noting for applications
-requiring precise reconstruction.
+\paragraph{Reconstruction-fidelity trade-off.}
+Improved perceptual quality comes with a measurable increase in validation reconstruction loss.
+This reflects a well-known characteristic of adversarial audio models:
+the generator is partially optimized to produce audio that sounds plausible rather than spectrally identical to the input.
+In practice, outputs sound more clean and musical but may reproduce the specific input less faithfully.
+For timbre transfer and morphing, this trade-off is acceptable
+but should be considered for applications requiring precise reconstruction.
 
 \paragraph{Training stability and cost.}
-Adversarial training is more sensitive to hyperparameters than the
-baseline VAE.
-Balancing the discriminator, adversarial, and feature-matching loss
-weights ($\lambda_{\text{adv}}, \lambda_{\text{FM}}$) requires care:
-an overpowered discriminator suppresses the generator early; too little
-adversarial pressure yields no benefit over the baseline.
-Each training step also requires two additional discriminator forward
-passes (real and fake), increasing per-epoch wall time significantly
-compared to the non-adversarial run.
+Adversarial training is more sensitive to hyperparameters than the baseline VAE.
+Balancing the discriminator, adversarial, and feature-matching loss weights
+($\lambda_{\text{adv}}, \lambda_{\text{FM}}$) requires care:
+an overpowered discriminator can suppress the generator early,
+whereas too little adversarial pressure yields little improvement over the baseline.
+Each training step also requires two additional discriminator forward passes (real and fake),
+increasing per-epoch wall time significantly compared to the non-adversarial model.
 
-\paragraph{Ongoing: encoder freezing.}
-One approach we are currently exploring is freezing the encoder weights
-when adversarial training begins at epoch 150.
-The motivation is that by this point the encoder has learned a stable
-and well-structured latent space; allowing the adversarial loss to
-propagate gradients back through the encoder risks distorting that
-structure in ways that are difficult to recover.
-Freezing the encoder constrains the adversarial fine-tuning to the
-decoder only, which is the component most directly responsible for
-audio quality, and is more consistent with RAVE's two-phase training
-strategy~\cite{caillon2021ravevariationalautoencoderfast}.
+We are also exploring freezing the encoder when adversarial training begins,
+constraining fine-tuning to the decoder and preserving the latent structure
+established during VAE warmup --- consistent with RAVE's two-phase
+approach~\cite{caillon2021ravevariationalautoencoderfast}.
 
-\TODO{Update with final quantitative results and spectrogram comparisons
-once the adversarial run completes.}
+% \TODO{Review and update with final quantitative results and spectrogram comparisons
+% once the adversarial run completes.}
 
 % ══════════════════════════════════════════════════════════
 \section{Interactive Demo}
@@ -575,31 +540,52 @@ once the adversarial run completes.}
 \begin{figure}[!t]
     \centering
     \includegraphics[width=\linewidth]{demo.png}
-    \caption{Gradio demo interface: upload 2--3 audio files, drag
-    the interpolation slider, and listen to the morphed output.}
+    \caption{Gradio demo interface: upload 2--3 audio files and drag
+    the interpolation slider.}
     \label{fig:demo}
 \end{figure}
 
-\TODO{Describe the demo: file upload, slerp slider, mode toggle
-(per-chunk vs.\ mean+offset), outputs (audio, spectrogram, latent PCA).
-Note run command: \texttt{python demo\_raw.py -r <checkpoint>.pth}.}
+We implemented a Gradio-based interactive demo (Figure~\ref{fig:demo}) for
+exploring the trained models. Users upload 2--3 audio files, which are
+encoded chunk-by-chunk into the latent space. A slider performs slerp
+interpolation between them in either per-chunk or mean+offset mode,
+and the output is played back alongside spectrum and latent space visualizations.
+
+The demo runs locally against any saved checkpoint:
+\texttt{python demo\_raw.py -r <checkpoint>.pth}
 
 % ══════════════════════════════════════════════════════════
 \section{Conclusions}
 \label{sec:conclusions}
 
-\TODO{Summarize the progression: SpecVAE $\to$ RawAudioVAE $\to$
-larger datasets $\to$ adversarial. Key takeaways:
-\begin{itemize}
-    \item MR-STFT loss is critical for stable raw-waveform VAE training.
-    \item Temporal latent space at 86\,Hz meaningfully outperforms single-vector latent.
-    \item Dataset scale matters: 21k clips vs.\ 29 files is the biggest single factor.
-    \item Adversarial training improves perceived quality but requires careful phasing.
-    \item The latent space supports musically meaningful interpolation without supervision.
-\end{itemize}}
+We explored a progression of VAE architectures for audio synthesis and timbre transfer,
+ranging from a spectrogram-domain baseline to a raw-waveform model trained on large,
+diverse datasets with adversarial augmentation. Several key lessons emerged.
 
-\TODO{Future directions: real-time inference, larger latent dims,
-class-conditional generation, pitch-aware timbre transfer.}
+The multi-resolution STFT loss is critical for stable training of raw-waveform VAEs,
+and temporal latent representations at 86\,Hz substantially outperform a single global vector.
+Dataset scale is the single largest factor in reconstruction quality:
+expanding from 29 files to 21k clips yields a greater improvement than any architectural change.
+Adversarial training enhances perceptual quality but comes at the cost of
+reconstruction fidelity and training stability.
+The latent space learns musically meaningful structure without explicit supervision,
+supporting smooth timbral morphing between sounds.
+
+\paragraph{Future work.}
+There is much still to explore. Increasing the latent dimensionality may improve
+reconstruction and increase the capacity of the latent space.
+RAVE-style latent pruning (identifying and removing inactive dimensions
+before adversarial fine-tuning) could yield a more compact and interpretable latent space.
+Experimenting with waveform-domain discriminators (as in RAVE and MelGAN)
+in place of the spectrogram discriminator may further improve perceptual quality.
+Explicitly labeling or regularizing latent dimensions with perceptual descriptors,
+following Natsiou et al., could make the morphing interface more controllable and interpretable.
+More ambitiously, replacing the raw waveform input with a pre-trained neural audio codec
+(e.g., Mimi~\cite{defossez2024moshi}) as a front-end tokenizer could
+substantially improve reconstruction quality by offloading low-level waveform modeling
+to a dedicated codec and allowing the VAE to operate in a perceptually richer token space.
+
+Demo materials, including audio examples and the interactive Gradio interface, are available at: \TODO{link if hosted}.
 
 % ══════════════════════════════════════════════════════════
 \bibliographystyle{plain}
