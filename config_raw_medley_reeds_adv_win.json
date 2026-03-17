@@ -63,7 +63,9 @@
         "free_bits": 0.1,
 
         "adv_start_epoch": 250,
-        "lambda_adv": 0.2,
-        "lambda_fm": 2.0
+        "lambda_adv": 1.0,
+        "lambda_fm": 2.0,
+        "discriminator": "waveform",
+        "freeze_encoder": true
     }
 }

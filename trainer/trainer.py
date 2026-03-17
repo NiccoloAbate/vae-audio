@@ -2,7 +2,7 @@ import numpy as np
 import torch
 from torchvision.utils import make_grid
 from base import BaseTrainer
-from model.model import MultiScaleSpecDiscriminator
+from model.model import MultiScaleDiscriminator, MultiScaleSpecDiscriminator
 from model.loss import discriminator_loss, generator_adversarial_loss, feature_matching_loss
 
 
@@ -267,12 +267,18 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
         self.free_bits   = cfg_adv.get('free_bits',   0.25)
 
         # Adversarial hyper-parameters
-        self.adv_start_epoch = cfg_adv.get('adv_start_epoch', 50)
-        self.lambda_adv      = cfg_adv.get('lambda_adv', 1.0)
-        self.lambda_fm       = cfg_adv.get('lambda_fm', 2.0)
+        self.adv_start_epoch  = cfg_adv.get('adv_start_epoch', 50)
+        self.lambda_adv       = cfg_adv.get('lambda_adv', 1.0)
+        self.lambda_fm        = cfg_adv.get('lambda_fm', 2.0)
+        self.freeze_encoder   = cfg_adv.get('freeze_encoder', False)
+        self._encoder_frozen  = False
 
         # Discriminator (created here so it isn't exposed to train.py)
-        self.disc = MultiScaleSpecDiscriminator().to(self.device)
+        disc_type = cfg_adv.get('discriminator', 'waveform')
+        if disc_type == 'spectrogram':
+            self.disc = MultiScaleSpecDiscriminator().to(self.device)
+        else:
+            self.disc = MultiScaleDiscriminator().to(self.device)
         self.disc_optimizer = torch.optim.Adam(
             self.disc.parameters(), lr=3e-4, betas=(0.5, 0.9)
         )
@@ -280,10 +286,21 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
     def _beta(self, epoch):
         return min(epoch / self.beta_warmup, 1.0) * self.beta_max
 
+    def _maybe_freeze_encoder(self):
+        """Freeze encoder weights on first adversarial epoch (if configured)."""
+        if self.freeze_encoder and not self._encoder_frozen:
+            for name, p in self.model.named_parameters():
+                if name.startswith('encoder') or name.startswith('mu_proj') or name.startswith('logvar_proj'):
+                    p.requires_grad_(False)
+            self._encoder_frozen = True
+            self.logger.info('Encoder frozen — adversarial training will only update decoder.')
+
     def _train_epoch(self, epoch):
         self.model.train()
         self.disc.train()
         use_adv = epoch >= self.adv_start_epoch
+        if use_adv:
+            self._maybe_freeze_encoder()
 
         total_loss = total_recon = total_kl = 0
         total_disc = total_gen_adv = total_fm = 0
@@ -312,8 +329,14 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
                 loss_fm      = feature_matching_loss(real_out, fake_out_gen)
 
             # ── Update VAE ───────────────────────────────────────────────
+            # RAVE stage 2: encoder frozen → decoder loss = Lgen + S(x,x̂) + LFM
+            # (no KL term since encoder params are not being updated)
             beta = self._beta(epoch)
-            if use_adv:
+            if use_adv and self._encoder_frozen:
+                vae_loss = (loss_recon
+                            + self.lambda_adv * loss_gen_adv
+                            + self.lambda_fm  * loss_fm)
+            elif use_adv:
                 vae_loss = (loss_recon
                             + beta * loss_kl
                             + self.lambda_adv * loss_gen_adv
