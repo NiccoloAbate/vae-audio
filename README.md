@@ -1,7 +1,7 @@
 # Exploring VAEs for Audio Synthesis and Timbre Transfer
 
-EE 269 — Signal Processing of Music and Audio
-CCRMA, Stanford University — Niccolo Abate, March 2026
+EE 269 — Signal Processing and Quantization for Machine Learning
+Stanford University — Niccolo Abate, March 2026
 
 This project explores Variational Autoencoders (VAEs) as a framework for audio synthesis and timbre transfer, progressing from a spectrogram-domain baseline (SpecVAE) to a raw-waveform model (RawAudioVAE) trained on increasingly large datasets, with an optional adversarial extension.
 
@@ -74,8 +74,8 @@ Two interpolation modes are available: **per-chunk slerp** (morphs full latent s
 ## Datasets
 
 - **Small dataset** — 29 recordings, 2 classes (included in repo via [yjlolo/vae-audio](https://github.com/yjlolo/vae-audio))
-- **ESC-50** — 2,000 environmental sound clips, 50 classes
-- **Medley-Solos-DB** — 21,571 clips of 8 tonal instruments
+- **[ESC-50](https://github.com/karolpiczak/ESC-50)** — 2,000 environmental sound clips, 50 classes
+- **[Medley-Solos-DB](https://doi.org/10.5281/zenodo.3464194)** — 21,571 clips of 8 tonal instruments
 
 *Larger datasets not included - must be downloaded separately and then pre-processed with the included scripts.
 
