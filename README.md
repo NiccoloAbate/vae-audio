@@ -77,4 +77,6 @@ Two interpolation modes are available: **per-chunk slerp** (morphs full latent s
 - **ESC-50** — 2,000 environmental sound clips, 50 classes
 - **Medley-Solos-DB** — 21,571 clips of 8 tonal instruments
 
+*Larger datasets not included - must be downloaded separately and then pre-processed with the included scripts.
+
 Place audio files under `dataset/` and point the config `data_dir` field accordingly.
