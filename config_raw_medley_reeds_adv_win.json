@@ -47,7 +47,7 @@
 
     "trainer": {
         "type": "RawAudioVaeAdversarialTrainer",
-        "epochs": 1000,
+        "epochs": 1500,
 
         "save_dir": "saved/",
         "save_period": 10,
@@ -62,10 +62,10 @@
         "beta_warmup": 200,
         "free_bits": 0.1,
 
-        "adv_start_epoch": 250,
-        "lambda_adv": 1.0,
+        "adv_start_epoch": 500,
+        "lambda_adv": 0.5,
         "lambda_fm": 2.0,
         "discriminator": "waveform",
-        "freeze_encoder": true
+        "freeze_encoder": false
     }
 }
