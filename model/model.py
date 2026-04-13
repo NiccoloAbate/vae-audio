@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from scipy.signal.windows import kaiser
 from base import BaseModel, BaseVAE, BaseGMVAE
 
 
@@ -60,54 +61,155 @@ class DecoderBlock(nn.Module):
         return self.res(self.conv(self.act(x)))
 
 
+def _pqmf_prototype_filter(taps=62, cutoff_ratio=0.142, beta=9.0):
+    """Kaiser-windowed sinc prototype lowpass filter for PQMF.
+
+    Based on: 'A Kaiser window approach for the design of prototype filters
+    of cosine modulated filterbanks' (IEEE 1998).
+    """
+    assert taps % 2 == 0
+    assert 0.0 < cutoff_ratio < 1.0
+    omega_c = np.pi * cutoff_ratio
+    idx = np.arange(taps + 1)
+    with np.errstate(invalid="ignore"):
+        h = np.sin(omega_c * (idx - 0.5 * taps)) / (np.pi * (idx - 0.5 * taps))
+    h[taps // 2] = np.cos(0) * cutoff_ratio   # fix NaN at centre tap
+    h *= kaiser(taps + 1, beta)
+    return h
+
+
+class PQMF(nn.Module):
+    """Pseudo-Quadrature Mirror Filterbank (analysis + synthesis).
+
+    Based on ParallelWaveGAN / multiband-HiFiGAN implementation
+    (kan-bayashi, MIT License).
+
+    Analysis:  (B, 1, T) -> (B, n_bands, T // n_bands)
+    Synthesis: (B, n_bands, T // n_bands) -> (B, 1, T)
+
+    Args:
+        n_bands:      number of subbands (default 4; use 16 for RAVE-style)
+        taps:         prototype filter length in taps (default 62)
+        cutoff_ratio: prototype lowpass cutoff as fraction of Nyquist.
+                      Rule of thumb: slightly above 1 / (2 * n_bands).
+                      Default 0.142 is tuned for n_bands=4; use ~0.04 for n_bands=16.
+        beta:         kaiser window beta (default 9.0)
+    """
+    def __init__(self, n_bands=4, taps=62, cutoff_ratio=0.142, beta=9.0):
+        super().__init__()
+        self.n_bands = n_bands
+
+        h_proto = _pqmf_prototype_filter(taps, cutoff_ratio, beta)
+
+        h_analysis  = np.zeros((n_bands, len(h_proto)))
+        h_synthesis = np.zeros((n_bands, len(h_proto)))
+        for k in range(n_bands):
+            cf = (2 * k + 1) * (np.pi / (2 * n_bands)) * (np.arange(taps + 1) - taps / 2)
+            phase = (-1) ** k * np.pi / 4
+            h_analysis[k]  = 2 * h_proto * np.cos(cf + phase)
+            h_synthesis[k] = 2 * h_proto * np.cos(cf - phase)
+
+        # analysis_filter:  (n_bands, 1, taps+1)   — used as grouped conv weight
+        # synthesis_filter: (1, n_bands, taps+1)   — single-output conv weight
+        self.register_buffer("analysis_filter",
+                             torch.from_numpy(h_analysis).float().unsqueeze(1))
+        self.register_buffer("synthesis_filter",
+                             torch.from_numpy(h_synthesis).float().unsqueeze(0))
+
+        # Identity-stride filter for polyphase up/downsampling
+        updown = torch.zeros(n_bands, n_bands, n_bands).float()
+        for k in range(n_bands):
+            updown[k, k, 0] = 1.0
+        self.register_buffer("updown_filter", updown)
+
+        self.pad_fn = nn.ConstantPad1d(taps // 2, 0.0)
+
+    def analysis(self, x):
+        """(B, 1, T) -> (B, n_bands, T // n_bands)"""
+        x = F.conv1d(self.pad_fn(x), self.analysis_filter)
+        return F.conv1d(x, self.updown_filter, stride=self.n_bands)
+
+    def synthesis(self, x):
+        """(B, n_bands, T // n_bands) -> (B, 1, T)"""
+        x = F.conv_transpose1d(x, self.updown_filter * self.n_bands, stride=self.n_bands)
+        return F.conv1d(self.pad_fn(x), self.synthesis_filter)
+
+    def forward(self, x):
+        return self.analysis(x)
+
+
 class RawAudioVAE(nn.Module):
     """
     Raw-waveform VAE with a temporal latent space.
 
-    Encoder downsamples (B, 1, T) -> (B, latent_dim, T//total_stride).
-    Decoder upsamples (B, latent_dim, T//total_stride) -> (B, 1, T).
-    Total downsampling = product(strides).
+    Without PQMF (n_bands=None):
+        Encoder: (B, 1, T) -> (B, latent_dim, T//product(strides))
+        Decoder: reverse
+        Default strides=[4,4,4,4], chunk=16384 → T_lat=64
 
-    With default strides=[4,4,4,4] and chunk_size=16384:
-    latent frames = 16384 / 256 = 64  (at 22050 Hz → ~86 Hz latent rate)
+    With PQMF (n_bands=16):
+        PQMF first decomposes (B,1,T) -> (B,16,T//16), then encoder/decoder
+        operate on subbands, and inverse PQMF reconstructs audio.
+        Use strides=[4,4,4], channels=[64,128,256,512] → T_lat=16
+        Total compression: 16 × 64 = 1024x
     """
-    def __init__(self, latent_dim=64, channels=(32, 64, 128, 256, 512), strides=(4, 4, 4, 4)):
+    def __init__(self, latent_dim=64, channels=(32, 64, 128, 256, 512),
+                 strides=(4, 4, 4, 4), n_bands=None):
         super().__init__()
         channels = list(channels)
         strides  = list(strides)
         assert len(channels) == len(strides) + 1
 
         self.latent_dim = latent_dim
+        self.n_bands    = n_bands
+
+        # Optional PQMF filterbank
+        # (taps, cutoff_ratio) pairs optimised per band count by SNR sweep:
+        #   N=4:  taps=62,  cutoff=0.142 → ~40 dB SNR
+        #   N=16: taps=128, cutoff=0.039 → ~32 dB SNR (was 17 dB with taps=62)
+        if n_bands is not None:
+            pqmf_params = {4: (62, 0.142), 8: (62, 0.072), 16: (128, 0.039)}
+            taps, cutoff_ratio = pqmf_params.get(n_bands, (128, 0.039))
+            self.pqmf    = PQMF(n_bands=n_bands, taps=taps, cutoff_ratio=cutoff_ratio)
+            in_ch        = n_bands
+            out_ch       = n_bands
+        else:
+            self.pqmf    = None
+            in_ch        = 1
+            out_ch       = 1
 
         # Encoder
-        enc = [nn.Conv1d(1, channels[0], 7, padding=3)]
+        enc = [nn.Conv1d(in_ch, channels[0], 7, padding=3)]
         for i, s in enumerate(strides):
             enc.append(EncoderBlock(channels[i], channels[i + 1], s))
-        self.encoder      = nn.Sequential(*enc)
-        self.mu_proj      = nn.Conv1d(channels[-1], latent_dim, 1)
-        self.logvar_proj  = nn.Conv1d(channels[-1], latent_dim, 1)
+        self.encoder     = nn.Sequential(*enc)
+        self.mu_proj     = nn.Conv1d(channels[-1], latent_dim, 1)
+        self.logvar_proj = nn.Conv1d(channels[-1], latent_dim, 1)
 
         # Decoder
         dec_ch = list(reversed(channels))
-        dec = [nn.Conv1d(latent_dim, dec_ch[0], 1)]
+        dec    = [nn.Conv1d(latent_dim, dec_ch[0], 1)]
         for i, s in enumerate(reversed(strides)):
             dec.append(DecoderBlock(dec_ch[i], dec_ch[i + 1], s))
-        dec += [
-            nn.LeakyReLU(0.2), 
-            nn.Conv1d(dec_ch[-1], 1, 7, padding=3),
-            nn.Tanh()
-        ]
+        dec += [nn.LeakyReLU(0.2), nn.Conv1d(dec_ch[-1], out_ch, 7, padding=3)]
+        if n_bands is None:
+            dec.append(nn.Tanh())   # raw waveform output clipped to [-1, 1]
         self.decoder = nn.Sequential(*dec)
 
     def encode(self, x):
-        h      = self.encoder(x)                             # (B, C, T_lat)
-        mu     = self.mu_proj(h)                             # (B, D, T_lat)
+        if self.pqmf is not None:
+            x = self.pqmf.analysis(x)               # (B, N, T//N)
+        h      = self.encoder(x)                     # (B, C, T_lat)
+        mu     = self.mu_proj(h)                     # (B, D, T_lat)
         logvar = self.logvar_proj(h)
         z      = mu + torch.randn_like(mu) * (0.5 * logvar).exp()
         return mu, logvar, z
 
     def decode(self, z):
-        return self.decoder(z)                               # (B, 1, T)
+        x = self.decoder(z)                          # (B, N or 1, T//N or T)
+        if self.pqmf is not None:
+            x = self.pqmf.synthesis(x)               # (B, 1, T)
+        return x
 
     def forward(self, x):
         mu, logvar, z = self.encode(x)
@@ -284,18 +386,24 @@ class WaveformDiscriminatorBlock(nn.Module):
 
     Returns (feature_maps, logits) where feature_maps is a list of
     intermediate activations used for feature-matching loss.
+
+    Args:
+        capacity: channel width multiplier. Default 8 gives ~1.5M params/scale
+                  (3 scales ≈ 4.5M total). Use 16 to restore the original
+                  ~5.6M/scale (16.9M total) if needed.
     """
-    def __init__(self):
+    def __init__(self, capacity=8):
         super().__init__()
+        c = capacity
         self.convs = nn.ModuleList([
-            nn.utils.weight_norm(nn.Conv1d(1,    16,   15, 1,  padding=7)),
-            nn.utils.weight_norm(nn.Conv1d(16,   64,   41, 4,  groups=4,   padding=20)),
-            nn.utils.weight_norm(nn.Conv1d(64,   256,  41, 4,  groups=16,  padding=20)),
-            nn.utils.weight_norm(nn.Conv1d(256,  1024, 41, 4,  groups=64,  padding=20)),
-            nn.utils.weight_norm(nn.Conv1d(1024, 1024, 41, 4,  groups=256, padding=20)),
-            nn.utils.weight_norm(nn.Conv1d(1024, 1024, 5,  1,  padding=2)),
+            nn.utils.weight_norm(nn.Conv1d(1,    c,    15, 1,  padding=7)),
+            nn.utils.weight_norm(nn.Conv1d(c,    4*c,  41, 4,  groups=max(1, c//4),   padding=20)),
+            nn.utils.weight_norm(nn.Conv1d(4*c,  16*c, 41, 4,  groups=c,              padding=20)),
+            nn.utils.weight_norm(nn.Conv1d(16*c, 64*c, 41, 4,  groups=4*c,            padding=20)),
+            nn.utils.weight_norm(nn.Conv1d(64*c, 64*c, 41, 4,  groups=16*c,           padding=20)),
+            nn.utils.weight_norm(nn.Conv1d(64*c, 64*c, 5,  1,  padding=2)),
         ])
-        self.output_conv = nn.utils.weight_norm(nn.Conv1d(1024, 1, 3, 1, padding=1))
+        self.output_conv = nn.utils.weight_norm(nn.Conv1d(64*c, 1, 3, 1, padding=1))
 
     def forward(self, x):
         features = []
@@ -314,13 +422,16 @@ class MultiScaleDiscriminator(nn.Module):
     progressively lower resolutions (original, 2x, 4x downsampled).
 
     forward() returns a list of (feature_maps, logits) — one per scale.
+
+    Args:
+        capacity: passed to each WaveformDiscriminatorBlock.
     """
-    def __init__(self):
+    def __init__(self, capacity=8):
         super().__init__()
         self.discriminators = nn.ModuleList([
-            WaveformDiscriminatorBlock(),
-            WaveformDiscriminatorBlock(),
-            WaveformDiscriminatorBlock(),
+            WaveformDiscriminatorBlock(capacity),
+            WaveformDiscriminatorBlock(capacity),
+            WaveformDiscriminatorBlock(capacity),
         ])
 
     def forward(self, x):

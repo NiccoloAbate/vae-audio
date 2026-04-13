@@ -698,6 +698,18 @@ if __name__ == '__main__':
     parser.add_argument('-o', '--out_dir',   default='eval/raw_run',
                         help='output directory (default: eval/raw_run/)')
 
-    args   = parser.parse_args()
+    args = parser.parse_args()
+
+    # Auto-derive output dir from checkpoint path if not specified:
+    # saved/models/RunName/TIMESTAMP/checkpoint-epochN.pth
+    # -> eval/TIMESTAMP_epochN/
+    if args.out_dir == 'eval/raw_run':
+        import re as _re
+        ckpt = args.resume
+        ts   = _re.search(r'(\d{4}_\d{6})', ckpt)
+        ep   = _re.search(r'epoch(\d+)', ckpt)
+        if ts and ep:
+            args.out_dir = f'eval/{ts.group(1)}_epoch{ep.group(1)}'
+
     config = ConfigParser(parser)
     main(config, args.resume, args.n_samples, args.out_dir)

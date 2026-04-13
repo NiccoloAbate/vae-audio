@@ -267,20 +267,31 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
         self.free_bits   = cfg_adv.get('free_bits',   0.25)
 
         # Adversarial hyper-parameters
-        self.adv_start_epoch  = cfg_adv.get('adv_start_epoch', 50)
-        self.lambda_adv       = cfg_adv.get('lambda_adv', 1.0)
-        self.lambda_fm        = cfg_adv.get('lambda_fm', 2.0)
-        self.freeze_encoder   = cfg_adv.get('freeze_encoder', False)
-        self._encoder_frozen  = False
+        self.adv_start_epoch   = cfg_adv.get('adv_start_epoch', 50)
+        self.lambda_adv        = cfg_adv.get('lambda_adv', 1.0)
+        self.lambda_fm         = cfg_adv.get('lambda_fm', 10.0)
+        self.freeze_encoder    = cfg_adv.get('freeze_encoder', False)
+        self.disc_update_every = cfg_adv.get('disc_update_every', 2)
+        self._encoder_frozen   = False
+        self._adv_step         = 0   # counts steps since adversarial phase began
 
         # Discriminator (created here so it isn't exposed to train.py)
-        disc_type = cfg_adv.get('discriminator', 'waveform')
+        disc_type     = cfg_adv.get('discriminator', 'waveform')
+        disc_capacity = cfg_adv.get('disc_capacity', 8)
+        gen_lr        = self.config['optimizer']['args']['lr']
+        disc_lr       = cfg_adv.get('disc_lr', gen_lr / 10.0)
+
         if disc_type == 'spectrogram':
             self.disc = MultiScaleSpecDiscriminator().to(self.device)
         else:
-            self.disc = MultiScaleDiscriminator().to(self.device)
+            self.disc = MultiScaleDiscriminator(capacity=disc_capacity).to(self.device)
         self.disc_optimizer = torch.optim.Adam(
-            self.disc.parameters(), lr=3e-4, betas=(0.5, 0.9)
+            self.disc.parameters(), lr=disc_lr, betas=(0.5, 0.9)
+        )
+        self.logger.info(
+            f'Discriminator: type={disc_type}, capacity={disc_capacity}, '
+            f'disc_lr={disc_lr:.2e}, update_every={self.disc_update_every}, '
+            f'lambda_fm={self.lambda_fm}'
         )
 
     def _beta(self, epoch):
@@ -313,17 +324,24 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
             loss_recon, loss_kl  = self.loss(x, y_hat, mu, logvar, free_bits=self.free_bits)
 
             if use_adv:
-                # ── Update Discriminator ──────────────────────────────────
-                real_out   = self.disc(x)
-                fake_out_d = self.disc(y_hat.detach())
-                loss_disc  = discriminator_loss(real_out, fake_out_d)
+                self._adv_step += 1
+                update_disc = (self._adv_step % self.disc_update_every == 0)
 
-                self.disc_optimizer.zero_grad()
-                loss_disc.backward()
-                self.disc_optimizer.step()
+                # ── Update Discriminator (every disc_update_every steps) ───
+                if update_disc:
+                    real_out   = self.disc(x)
+                    fake_out_d = self.disc(y_hat.detach())
+                    loss_disc  = discriminator_loss(real_out, fake_out_d)
+
+                    self.disc_optimizer.zero_grad()
+                    loss_disc.backward()
+                    self.disc_optimizer.step()
+                else:
+                    loss_disc = torch.tensor(0.0, device=x.device)
 
                 # ── Adversarial + Feature-Matching losses for VAE ─────────
-                # real_out tensor values survive backward(); reuse for FM.
+                # Always compute real_out for FM (no disc update on off-steps).
+                real_out     = self.disc(x)
                 fake_out_gen = self.disc(y_hat)          # gradients flow to VAE
                 loss_gen_adv = generator_adversarial_loss(fake_out_gen)
                 loss_fm      = feature_matching_loss(real_out, fake_out_gen)
