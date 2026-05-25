@@ -22,7 +22,8 @@ class BaseDataLoader(DataLoader):
             'batch_size': batch_size,
             'shuffle': self.shuffle,
             'collate_fn': collate_fn,
-            'num_workers': num_workers
+            'num_workers': num_workers,
+            'multiprocessing_context': 'spawn' if num_workers > 0 else None,
         }
         super(BaseDataLoader, self).__init__(sampler=self.sampler, **self.init_kwargs)
 

@@ -44,9 +44,11 @@ def get_device():
     return torch.device('cpu')
 
 
-def load_model_and_data(config, resume, device):
+def load_model_and_data(config, resume, device, seed=42):
     dl_args = dict(config['data_loader']['args'])
-    dl_args.update({'validation_split': 0.0, 'shuffle': False, 'subset': None})
+    dl_args.update({'validation_split': 0.0, 'shuffle': True, 'subset': None,
+                    'num_workers': 0})
+    torch.manual_seed(seed)
     data_loader = getattr(module_data, config['data_loader']['type'])(**dl_args)
 
     model = config.initialize('arch', module_arch)
@@ -70,15 +72,21 @@ def collect_latents_and_recons(model, data_loader, device, max_per_class=64, see
     mu / logvar are pooled over the temporal axis (mean over T_lat) to give
     a single D-dim vector per chunk, suitable for PCA and KL-per-dim plots.
     """
-    # Collect everything first, then stratified-subsample
     mu_list, logvar_list = [], []
     inp_list, rec_list   = [], []
     labels_out, fnames_out, cidx_out = [], [], []
 
     dataset = data_loader.dataset
+    per_class = {}  # count collected so far per class
 
     with torch.no_grad():
         for data_idx, label, data in data_loader:
+            # Stop early once every seen class has enough samples
+            if per_class and all(per_class.get(l, 0) >= max_per_class
+                                 for l in set(per_class)):
+                if sum(per_class.values()) >= max_per_class * len(per_class):
+                    break
+
             x = data.float().to(device)
             y_hat, mu, logvar, _ = model(x)
 
@@ -92,6 +100,7 @@ def collect_latents_and_recons(model, data_loader, device, max_per_class=64, see
                 fnames_out.append(os.path.basename(fpath))
                 cidx_out.append(chunk_start // dataset.chunk_size)
                 labels_out.append(lbl)
+                per_class[lbl] = per_class.get(lbl, 0) + 1
 
     mu_all      = torch.cat(mu_list)
     logvar_all  = torch.cat(logvar_list)
@@ -364,6 +373,24 @@ def reconstruct_full_file_raw(model, wav_path, device, sr=22050,
     return orig_full, recon_full
 
 
+def save_chunk_audio(inputs, recons, labels, filenames, chunk_indices,
+                     sample_indices, out_dir, sr=22050):
+    """Save already-collected input/recon chunks directly as .wav pairs (fast, no file I/O)."""
+    os.makedirs(out_dir, exist_ok=True)
+    for row, i in enumerate(sample_indices):
+        orig  = inputs[i].numpy()
+        recon = recons[i].numpy()
+        fname = filenames[i] if i < len(filenames) else f'chunk{i}'
+        lbl   = labels[i]   if i < len(labels)    else 'unk'
+        stem  = os.path.splitext(fname)[0]
+        tag   = f'{row:03d}_{lbl}_{stem}_c{chunk_indices[i]}'
+        sf.write(os.path.join(out_dir, f'{tag}_orig.wav'),
+                 orig  / (np.abs(orig).max()  + 1e-8), sr)
+        sf.write(os.path.join(out_dir, f'{tag}_recon.wav'),
+                 recon / (np.abs(recon).max() + 1e-8), sr)
+    print(f'Saved  {len(sample_indices)} chunk audio pairs → {out_dir}/')
+
+
 def save_audio_samples(model, dataset, labels, filenames, chunk_indices,
                        sample_indices, out_dir, device, sr=22050,
                        chunk_size=16384):
@@ -576,36 +603,122 @@ def plot_interpolations(model, dataset, filenames, chunk_indices, labels,
 
 
 # ---------------------------------------------------------------------------
-# PCA traversal
+# PCA traversal + feature analysis
 # ---------------------------------------------------------------------------
 
+def compute_audio_features(wave_np, sr=22050, repeat=4):
+    """Return an OrderedDict of scalar summary features for a decoded waveform.
+
+    repeat: tile the waveform this many times before F0 estimation so pyin
+    has enough frames (~3 s at repeat=4) to give reliable pitch estimates.
+    """
+    import librosa
+    from collections import OrderedDict
+
+    rms = float(np.sqrt(np.mean(wave_np ** 2)))
+
+    # F0 via pyin — tile for stable estimation, measure on original length
+    try:
+        long_wave = np.tile(wave_np, repeat)
+        f0, voiced, _ = librosa.pyin(long_wave, fmin=50, fmax=2000, sr=sr,
+                                     frame_length=2048)
+        f0_mean = float(np.nanmean(f0[voiced])) if voiced.any() else np.nan
+    except Exception:
+        f0_mean = np.nan
+
+    S = np.abs(librosa.stft(wave_np, n_fft=1024, hop_length=256))
+
+    centroid  = float(np.mean(librosa.feature.spectral_centroid(S=S, sr=sr)))
+    flatness  = float(np.mean(librosa.feature.spectral_flatness(S=S)))
+    # Spectral flux: mean L2 norm of frame-to-frame magnitude difference
+    flux = float(np.mean(np.sqrt(np.sum(np.diff(S, axis=1) ** 2, axis=0)))) \
+        if S.shape[1] > 1 else 0.0
+
+    return OrderedDict([
+        ('RMS',                rms),
+        ('F0 (Hz)',            f0_mean),
+        ('Spectral Centroid (Hz)', centroid),
+        ('Spectral Flux',      flux),
+        ('Spectral Flatness',  flatness),
+    ])
+
+
+def plot_feature_traversal(feature_profiles, alphas, pc_labels, out_path):
+    """
+    feature_profiles: list of dicts (one per PC), each mapping feature_name -> list of values
+    alphas:           1-D array of traversal values (same for all PCs)
+    pc_labels:        list of strings e.g. ['PC 1 (34.2%)', ...]
+    """
+    feature_names = list(feature_profiles[0].keys())
+    n_feat = len(feature_names)
+    n_pcs  = len(feature_profiles)
+
+    fig, axes = plt.subplots(n_feat, n_pcs,
+                             figsize=(3.5 * n_pcs, 2.2 * n_feat),
+                             squeeze=False)
+
+    for col, (profile, pc_lbl) in enumerate(zip(feature_profiles, pc_labels)):
+        for row, fname in enumerate(feature_names):
+            ax  = axes[row, col]
+            vals = np.array(profile[fname], dtype=float)
+            ax.plot(alphas, vals, lw=1.8, marker='o', markersize=3)
+            ax.axvline(0, color='grey', lw=0.7, ls='--')
+            ax.set_xlabel('α (σ units)', fontsize=7)
+            if col == 0:
+                ax.set_ylabel(fname, fontsize=7)
+            if row == 0:
+                ax.set_title(pc_lbl, fontsize=8)
+            ax.tick_params(labelsize=6)
+            # Highlight NaN regions for F0
+            if np.all(np.isnan(vals)):
+                ax.text(0.5, 0.5, 'no voiced frames',
+                        transform=ax.transAxes, ha='center', va='center',
+                        fontsize=7, color='grey')
+
+    fig.suptitle('Feature profiles along top PCA directions', fontsize=10)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=120, bbox_inches='tight')
+    plt.close(fig)
+    print(f'Saved  {out_path}')
+
+
 def plot_pca_traversal(model, mu_all, T_lat, device, n_components=3, n_steps=7,
-                       out_dir='.', n_fft=1024, hop=256):
+                       out_dir='.', n_fft=1024, hop=256, sr=22050,
+                       save_audio=True):
     """Traverse top PCA directions of the pooled latent space.
 
     Starting from the dataset mean (replicated over T_lat), move ±3σ along
     each principal component and decode to log-magnitude spectrograms.
     """
-    pca    = PCA(n_components=n_components)
+    pca     = PCA(n_components=n_components)
     pca.fit(mu_all.numpy())
     mu_mean = torch.tensor(pca.mean_, dtype=torch.float32)   # (D,)
 
+    if save_audio:
+        audio_dir = os.path.join(out_dir, 'pca_traversal_audio')
+        os.makedirs(audio_dir, exist_ok=True)
+
+    feature_profiles = []   # one dict per PC
+    pc_labels        = []
+
     for pc_idx in range(n_components):
-        direction = torch.tensor(pca.components_[pc_idx], dtype=torch.float32)  # (D,)
+        direction = torch.tensor(pca.components_[pc_idx], dtype=torch.float32)
         sigma     = float(np.sqrt(pca.explained_variance_[pc_idx]))
         alphas    = np.linspace(-3 * sigma, 3 * sigma, n_steps)
+        var_ratio = pca.explained_variance_ratio_[pc_idx] * 100
+        pc_labels.append(f'PC {pc_idx + 1} ({var_ratio:.1f}%)')
 
-        specs = []
+        specs, waves = [], []
         for alpha in alphas:
-            z_pool = mu_mean + alpha * direction           # (D,)
-            z_seq  = z_pool.unsqueeze(-1).expand(-1, T_lat)  # (D, T_lat)
+            z_pool = mu_mean + alpha * direction
+            z_seq  = z_pool.unsqueeze(-1).expand(-1, T_lat)
             wave   = decode_latent_seq(model, z_seq, device)
             specs.append(log_magnitude_stft(wave, n_fft, hop))
+            waves.append(wave)
 
-        var_ratio = pca.explained_variance_ratio_[pc_idx] * 100
+        # Spectrogram grid
         vmin = min(s.min() for s in specs)
         vmax = max(s.max() for s in specs)
-
         fig, axes = plt.subplots(1, n_steps, figsize=(2.2 * n_steps, 3),
                                  sharex=True, sharey=True)
         for col, (alpha, spec) in enumerate(zip(alphas, specs)):
@@ -623,17 +736,37 @@ def plot_pca_traversal(model, mu_all, T_lat, device, n_components=3, n_steps=7,
         plt.close(fig)
         print(f'Saved  {out_path}')
 
+        # Audio + features
+        profile = {k: [] for k in compute_audio_features(waves[0], sr).keys()}
+        for step_idx, (alpha, wave) in enumerate(zip(alphas, waves)):
+            if save_audio:
+                wav_path = os.path.join(audio_dir,
+                    f'pc{pc_idx + 1}_step{step_idx:02d}_a{alpha:+.2f}.wav')
+                sf.write(wav_path, wave / (np.abs(wave).max() + 1e-8), sr)
+            feats = compute_audio_features(wave, sr)
+            for k, v in feats.items():
+                profile[k].append(v)
+        feature_profiles.append(profile)
+
+    if save_audio:
+        print(f'Saved  PCA traversal audio → {audio_dir}/')
+
+    plot_feature_traversal(
+        feature_profiles, alphas, pc_labels,
+        os.path.join(out_dir, 'pca_traversal_features.png')
+    )
+
 
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
-def main(config, resume, n_samples, out_dir):
+def main(config, resume, n_samples, out_dir, chunk_audio=False, seed=42):
     device = get_device()
     print(f'Using device: {device}')
     os.makedirs(out_dir, exist_ok=True)
 
-    model, data_loader = load_model_and_data(config, resume, device)
+    model, data_loader = load_model_and_data(config, resume, device, seed=seed)
     sr         = config['data_loader']['args'].get('sr', 22050)
     chunk_size = config['data_loader']['args'].get('chunk_size', 16384)
 
@@ -668,20 +801,26 @@ def main(config, resume, n_samples, out_dir):
     plot_kl_per_dim(mu, logvar, os.path.join(out_dir, 'kl_per_dim.png'),
                     free_bits=free_bits)
 
-    save_audio_samples(model, data_loader.dataset, labels, filenames, chunk_indices,
-                       sample_indices, os.path.join(out_dir, 'audio'), device,
-                       sr=sr, chunk_size=chunk_size)
+    if chunk_audio:
+        save_chunk_audio(inputs, recons, labels, filenames, chunk_indices,
+                         sample_indices, os.path.join(out_dir, 'audio'), sr=sr)
+    else:
+        save_audio_samples(model, data_loader.dataset, labels, filenames, chunk_indices,
+                           sample_indices, os.path.join(out_dir, 'audio'), device,
+                           sr=sr, chunk_size=chunk_size)
 
     print('\nFull-file spectrogram plots…')
-    plot_full_file_spectrograms(model, data_loader.dataset, labels, filenames,
-                                chunk_indices, sample_indices, out_dir, device,
-                                sr=sr, chunk_size=chunk_size)
+    if not chunk_audio:
+        plot_full_file_spectrograms(model, data_loader.dataset, labels, filenames,
+                                    chunk_indices, sample_indices, out_dir, device,
+                                    sr=sr, chunk_size=chunk_size)
 
     print('\nLatent space analysis…')
     plot_interpolations(model, data_loader.dataset, filenames, chunk_indices, labels,
                         sample_indices, device, n_steps=8, out_dir=out_dir, sr=sr)
 
-    plot_pca_traversal(model, mu, T_lat, device, n_components=3, out_dir=out_dir)
+    plot_pca_traversal(model, mu, T_lat, device, n_components=3, out_dir=out_dir,
+                       sr=sr, save_audio=True)
 
     print('\nDone.')
 
@@ -697,6 +836,10 @@ if __name__ == '__main__':
                         help='number of chunks to visualise / save as audio')
     parser.add_argument('-o', '--out_dir',   default='eval/raw_run',
                         help='output directory (default: eval/raw_run/)')
+    parser.add_argument('--chunk_audio', action='store_true',
+                        help='save individual chunks as audio instead of full-file reconstruction')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='random seed for data shuffling (default: 42)')
 
     args = parser.parse_args()
 
@@ -712,4 +855,5 @@ if __name__ == '__main__':
             args.out_dir = f'eval/{ts.group(1)}_epoch{ep.group(1)}'
 
     config = ConfigParser(parser)
-    main(config, args.resume, args.n_samples, args.out_dir)
+    main(config, args.resume, args.n_samples, args.out_dir,
+         chunk_audio=args.chunk_audio, seed=args.seed)

@@ -1,5 +1,5 @@
 {
-    "name": "RawAudioVAE_Adv",
+    "name": "RawAudioVAE_Adv_Cello",
     "n_gpu": 1,
 
     "arch": {
@@ -12,16 +12,13 @@
     },
 
     "data_loader": {
-        "type": "RawAudioDataLoader",
+        "type": "NumpyChunkDataLoader",
         "args": {
-            "data_dir": ["dataset/medley-solos/organized"],
-            "sr": 22050,
-            "chunk_size": 16384,
+            "npy_path": "/home/niccoloabate/Datasets/CCBachCello_chunks.npy",
             "batch_size": 64,
             "shuffle": true,
             "validation_split": 0.1,
-            "num_workers": 4,
-            "subset": "train"
+            "num_workers": 2
         }
     },
 

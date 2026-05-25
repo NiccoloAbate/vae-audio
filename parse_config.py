@@ -19,7 +19,9 @@ class ConfigParser:
             os.environ["CUDA_VISIBLE_DEVICES"] = args.device
         if args.resume:
             self.resume = Path(args.resume)
-            self.cfg_fname = self.resume.parent / 'config.json'
+            # explicit -c takes precedence; fall back to checkpoint's config
+            self.cfg_fname = Path(args.config) if args.config else \
+                             self.resume.parent / 'config.json'
         else:
             msg_no_cfg = "Configuration file need to be specified. Add '-c config.json', for example."
             assert args.config is not None, msg_no_cfg

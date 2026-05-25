@@ -177,6 +177,39 @@ class RawAudioDataset(Dataset):
         return idx, label, y   # (1, chunk_size)
 
 
+class NumpyChunkDataset(Dataset):
+    """
+    Fast dataset backed by a pre-extracted .npy array of shape (N, chunk_size).
+    Zero file-seek overhead — ideal when torchaudio seeks are too slow.
+    """
+    def __init__(self, npy_path, label='cello', **kwargs):
+        import numpy as np, os, pickle
+        self.data = np.load(npy_path, mmap_mode='r')  # shape (N, chunk_size)
+        self.label = label
+        self.chunk_size = self.data.shape[1]
+
+        # Load per-chunk metadata (real wav paths) if available
+        meta_path = npy_path.replace('.npy', '_meta.pkl')
+        if os.path.exists(meta_path):
+            with open(meta_path, 'rb') as f:
+                meta = pickle.load(f)
+            self.items = meta['items']
+        else:
+            self.items = [(label, npy_path, i * self.chunk_size, 22050)
+                          for i in range(len(self.data))]
+
+        self.path_to_data = [it[1] for it in self.items]
+        self.labels = [it[0] for it in self.items]
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        import numpy as np
+        chunk = torch.from_numpy(self.data[idx].copy()).unsqueeze(0)  # (1, chunk_size)
+        return idx, self.label, chunk
+
+
 if __name__ == '__main__':
     path_to_data = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'myAudioDataset/audio')
     d = CollectData([path_to_data], subset=None, transform=None)
