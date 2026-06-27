@@ -1,5 +1,6 @@
 import os
 import torch
+import torch.nn.functional as F
 import torchaudio
 import soundfile as sf
 from pathlib import Path
@@ -208,6 +209,104 @@ class NumpyChunkDataset(Dataset):
         import numpy as np
         chunk = torch.from_numpy(self.data[idx].copy()).unsqueeze(0)  # (1, chunk_size)
         return idx, self.label, chunk
+
+
+class OneShotAudioDataset(Dataset):
+    """Serves one fixed-length, attack-aligned chunk per audio file.
+
+    Built for one-shot samples (e.g. drum hits) where each file is a single
+    coherent event, usually *shorter* than the target length. Unlike
+    RawAudioDataset (which slices long recordings into many interchangeable
+    chunks and silently drops any file shorter than chunk_size), this dataset:
+
+        1. recursively collects every audio file under the given dir(s),
+        2. trims leading silence so the onset lands near t=0 (attack alignment),
+        3. optionally peak-normalizes,
+        4. zero-pads (or truncates) to exactly chunk_size.
+
+    Returns (idx, label, waveform) with waveform shape (1, chunk_size) — the
+    same contract as RawAudioDataset, so the RawAudioVAE trainers work unchanged.
+
+    Args:
+        path_to_dataset: dir or list of dirs (searched recursively).
+        sr:              target sample rate (files are resampled to this).
+        chunk_size:      output length in samples (must be divisible by the
+                         model's total downsample factor, else the STFT recon
+                         loss will hit a length mismatch).
+        onset_thresh:    onset is the first sample exceeding this fraction of the
+                         file peak. Set 0 to disable attack alignment.
+        pre_pad:         samples of headroom kept before the detected onset so
+                         the very start of the transient is not clipped.
+        peak_norm:       peak-normalize each hit to ~0.95. Consistent levels help
+                         the tanh/PQMF output, but this discards velocity
+                         dynamics — set False if you want to model loudness.
+    """
+    def __init__(self, path_to_dataset, sr=22050, chunk_size=110080,
+                 onset_thresh=0.02, pre_pad=256, peak_norm=True,
+                 extensions=('.wav', '.flac', '.aif', '.aiff'), **kwargs):
+        if isinstance(path_to_dataset, str):
+            path_to_dataset = [path_to_dataset]
+
+        files = []
+        for d in path_to_dataset:
+            for root, _, fnames in os.walk(d):
+                for fn in sorted(fnames):
+                    if fn.lower().endswith(extensions):
+                        files.append(os.path.join(root, fn))
+        files.sort()
+        if len(files) == 0:
+            raise RuntimeError(f"No audio files found under {path_to_dataset}")
+
+        self.files        = files
+        self.sr           = sr
+        self.chunk_size   = chunk_size
+        self.onset_thresh = onset_thresh
+        self.pre_pad      = pre_pad
+        self.peak_norm    = peak_norm
+        # label = immediate parent dir name (keeps per-class structure if present)
+        self.labels       = [os.path.basename(os.path.dirname(f)) for f in files]
+        self.path_to_data = files
+
+    def __len__(self):
+        return len(self.files)
+
+    def _align_attack(self, y):
+        """y: (T,) -> trimmed so the onset sits pre_pad samples from the start."""
+        if self.onset_thresh <= 0:
+            return y
+        mag  = y.abs()
+        peak = mag.max()
+        if peak <= 0:
+            return y
+        above = (mag > self.onset_thresh * peak).nonzero()
+        if len(above) == 0:
+            return y
+        onset = int(above[0])
+        start = max(0, onset - self.pre_pad)
+        return y[start:]
+
+    def __getitem__(self, idx):
+        path = self.files[idx]
+        y, file_sr = torchaudio.load(path)             # (C, T)
+        if y.shape[0] > 1:
+            y = y.mean(0, keepdim=True)
+        if file_sr != self.sr:
+            y = torchaudio.functional.resample(y, file_sr, self.sr)
+        y = y.squeeze(0)                               # (T,)
+
+        y = self._align_attack(y)
+
+        if y.shape[0] < self.chunk_size:
+            y = F.pad(y, (0, self.chunk_size - y.shape[0]))
+        else:
+            y = y[:self.chunk_size]
+
+        if self.peak_norm:
+            peak = y.abs().max()
+            if peak > 1e-6:
+                y = y / peak * 0.95
+
+        return idx, self.labels[idx], y.unsqueeze(0)   # (1, chunk_size)
 
 
 if __name__ == '__main__':

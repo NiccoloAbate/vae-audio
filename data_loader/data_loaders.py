@@ -2,7 +2,7 @@ from torch.utils.data import Dataset
 from torchvision import datasets, transforms
 from base import BaseDataLoader
 from dataset import transformers, CollectData, NsynthSubset
-from dataset.datasets import RawAudioDataset, NumpyChunkDataset
+from dataset.datasets import RawAudioDataset, NumpyChunkDataset, OneShotAudioDataset
 
 
 class MnistDataLoader(BaseDataLoader):
@@ -56,6 +56,21 @@ class NumpyChunkDataLoader(BaseDataLoader):
     def __init__(self, npy_path, batch_size=64, shuffle=True,
                  validation_split=0.1, num_workers=2, **kwargs):
         self.dataset = NumpyChunkDataset(npy_path, **kwargs)
+        super().__init__(self.dataset, batch_size, shuffle, validation_split, num_workers)
+
+
+class OneShotAudioDataLoader(BaseDataLoader):
+    """DataLoader serving one fixed-length, attack-aligned chunk per file.
+
+    For one-shot datasets (e.g. drum hits) where each file is a single event.
+    Extra kwargs (onset_thresh, pre_pad, peak_norm, extensions) pass through to
+    OneShotAudioDataset.
+    """
+    def __init__(self, data_dir, sr=22050, chunk_size=110080,
+                 batch_size=8, shuffle=True, validation_split=0.1,
+                 num_workers=4, **kwargs):
+        self.dataset = OneShotAudioDataset(
+            path_to_dataset=data_dir, sr=sr, chunk_size=chunk_size, **kwargs)
         super().__init__(self.dataset, batch_size, shuffle, validation_split, num_workers)
 
 
