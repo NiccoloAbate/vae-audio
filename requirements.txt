@@ -1,6 +1,7 @@
 numpy
 torch
 torchaudio
+torchvision
 librosa
 matplotlib
 soundfile
