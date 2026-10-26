@@ -114,6 +114,10 @@ poster/*
 paper/*
 !paper/paper.tex
 
+# generated audio and latent banks (from licensed sample packs)
+demos/
+bank/
+
 # editor, os cache directory
 .vscode/
 .idea/

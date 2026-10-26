@@ -23,3 +23,4 @@
 ## Thoughts
 * Descriminator (adversarial training) is basically a normal conv1d classifier (I have done one of those!) which learns at the same time as the vae
 * "Feature matching" means taking the weights in the descriminator model and using those as features to evaluate the perceptual quality of the vae
+* Maybe have a loss balancer like EnCodec?

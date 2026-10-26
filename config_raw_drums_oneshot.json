@@ -14,7 +14,7 @@
     "data_loader": {
         "type": "OneShotAudioDataLoader",
         "args": {
-            "data_dir": ["/home/niccoloabate/Datasets/drums_oneshots"],
+            "data_dir": ["/scratch/users/nlabate/datasets/drums_oneshots"],
             "sr": 22050,
             "chunk_size": 110080,
             "onset_thresh": 0.02,
