@@ -293,6 +293,27 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
             f'disc_lr={disc_lr:.2e}, update_every={self.disc_update_every}, '
             f'lambda_fm={self.lambda_fm}'
         )
+        self._restore_extra_state()
+
+    def _extra_checkpoint_state(self):
+        state = super()._extra_checkpoint_state()
+        state['disc'] = self.disc.state_dict()
+        state['disc_optimizer'] = self.disc_optimizer.state_dict()
+        state['adv_step'] = self._adv_step
+        return state
+
+    def _restore_extra_state(self):
+        ckpt = self._resume_ckpt
+        if ckpt is not None:
+            if 'disc' in ckpt:
+                self.disc.load_state_dict(ckpt['disc'])
+                self.disc_optimizer.load_state_dict(ckpt['disc_optimizer'])
+                self._adv_step = ckpt.get('adv_step', 0)
+                self.logger.info('Discriminator state restored from checkpoint.')
+            elif ckpt['epoch'] >= self.adv_start_epoch:
+                self.logger.warning('Checkpoint has no discriminator state; the discriminator '
+                                    'restarts from random weights.')
+        super()._restore_extra_state()
 
     def _beta(self, epoch):
         return min(epoch / self.beta_warmup, 1.0) * self.beta_max

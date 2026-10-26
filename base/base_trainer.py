@@ -44,6 +44,7 @@ class BaseTrainer:
         # setup visualization writer instance
         self.writer = WriterTensorboardX(config.log_dir, self.logger, cfg_trainer['tensorboardX'])
 
+        self._resume_ckpt = None
         if config.resume is not None:
             self._resume_checkpoint(config.resume)
 
@@ -148,6 +149,7 @@ class BaseTrainer:
             'not_improved_count': self.not_improved_count,
             'config': self.config
         }
+        state.update(self._extra_checkpoint_state())
         filename = str(self.checkpoint_dir / 'checkpoint-epoch{}.pth'.format(epoch))
         torch.save(state, filename)
         self.logger.info("Saving checkpoint: {} ...".format(filename))
@@ -182,4 +184,32 @@ class BaseTrainer:
         else:
             self.optimizer.load_state_dict(checkpoint['optimizer'])
 
+        self._resume_ckpt = checkpoint     # for _restore_extra_state()
         self.logger.info("Checkpoint loaded. Resume training from epoch {}".format(self.start_epoch))
+
+    def _extra_checkpoint_state(self):
+        """State saved with each checkpoint beyond the model and optimizer.
+        Subclasses extend this with objects they own (e.g. a discriminator)."""
+        state = {}
+        if getattr(self, 'lr_scheduler', None) is not None:
+            state['lr_scheduler'] = self.lr_scheduler.state_dict()
+        return state
+
+    def _restore_extra_state(self):
+        """Restore what _extra_checkpoint_state() saved. Resuming happens in
+        BaseTrainer.__init__, before subclasses create their scheduler and other
+        objects, so subclasses call this at the end of their own __init__."""
+        ckpt = self._resume_ckpt
+        if ckpt is None:
+            return
+        sched = getattr(self, 'lr_scheduler', None)
+        if sched is not None:
+            if 'lr_scheduler' in ckpt:
+                sched.load_state_dict(ckpt['lr_scheduler'])
+            else:
+                # older checkpoint: the optimizer already holds the decayed lr,
+                # so only the epoch count needs to catch up
+                sched.last_epoch = ckpt['epoch']
+                self.logger.warning("Checkpoint has no lr_scheduler state; "
+                                    "continuing its schedule from epoch {}.".format(ckpt['epoch']))
+        self._resume_ckpt = None

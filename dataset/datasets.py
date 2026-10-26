@@ -1,3 +1,4 @@
+import hashlib
 import os
 import torch
 import torch.nn.functional as F
@@ -211,6 +212,22 @@ class NumpyChunkDataset(Dataset):
         return idx, self.label, chunk
 
 
+def oneshot_split(relpath, val=0.1, test=0.1):
+    """Fixed train/val/test assignment for one file, from a hash of its path.
+
+    `relpath` is relative to the dataset root, with '/' separators. The same
+    file always lands in the same split, on any machine and whatever other
+    files are added, removed or relabelled; the split is therefore not
+    stratified, only approximately 80/10/10 within each class.
+    """
+    h = int(hashlib.md5(relpath.encode('utf-8')).hexdigest()[:8], 16) / 0xFFFFFFFF
+    if h < test:
+        return 'test'
+    if h < test + val:
+        return 'val'
+    return 'train'
+
+
 class OneShotAudioDataset(Dataset):
     """Serves one fixed-length, attack-aligned chunk per audio file.
 
@@ -240,10 +257,18 @@ class OneShotAudioDataset(Dataset):
         peak_norm:       peak-normalize each hit to ~0.95. Consistent levels help
                          the tanh/PQMF output, but this discards velocity
                          dynamics — set False if you want to model loudness.
+        split:           None (all files) or 'train' / 'val' / 'test', using the
+                         fixed hash split in oneshot_split(). Requires a single
+                         dataset dir, since paths are taken relative to it.
+        types:           keep only these drum types (see drum_types.classify),
+                         e.g. ['kick', 'snare', 'clap', 'hat', 'cymbal', 'tom', 'perc'].
+                         'exclude' files are always dropped when types is set.
+        packs:           keep only files under these top-level folders.
     """
     def __init__(self, path_to_dataset, sr=22050, chunk_size=110080,
                  onset_thresh=0.02, pre_pad=256, peak_norm=True,
-                 extensions=('.wav', '.flac', '.aif', '.aiff'), **kwargs):
+                 extensions=('.wav', '.flac', '.aif', '.aiff'),
+                 split=None, types=None, packs=None, **kwargs):
         if isinstance(path_to_dataset, str):
             path_to_dataset = [path_to_dataset]
 
@@ -256,6 +281,25 @@ class OneShotAudioDataset(Dataset):
         files.sort()
         if len(files) == 0:
             raise RuntimeError(f"No audio files found under {path_to_dataset}")
+
+        if split is not None or types is not None or packs is not None:
+            assert len(path_to_dataset) == 1, "split/types/packs need a single dataset dir"
+            root = path_to_dataset[0]
+            from drum_types import classify
+            kept = []
+            for f in files:
+                rel = os.path.relpath(f, root).replace(os.sep, '/')
+                if split is not None and oneshot_split(rel) != split:
+                    continue
+                if packs is not None and rel.split('/')[0] not in packs:
+                    continue
+                if types is not None and classify(f, root=root) not in types:
+                    continue
+                kept.append(f)
+            files = kept
+            if len(files) == 0:
+                raise RuntimeError(f"No files left after split={split} types={types} packs={packs}")
+            print(f"OneShotAudioDataset: {len(files)} files (split={split}, types={types}, packs={packs})")
 
         self.files        = files
         self.sr           = sr

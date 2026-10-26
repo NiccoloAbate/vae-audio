@@ -1,0 +1,87 @@
+{
+    "name": "Drums_44k_PQMF",
+    "n_gpu": 1,
+    "arch": {
+        "type": "RawAudioVAE",
+        "args": {
+            "latent_dim": 32,
+            "channels": [
+                64,
+                128,
+                256,
+                512
+            ],
+            "strides": [
+                4,
+                4,
+                2
+            ],
+            "n_bands": 16
+        }
+    },
+    "data_loader": {
+        "type": "OneShotAudioDataLoader",
+        "args": {
+            "data_dir": [
+                "/scratch/users/nlabate/datasets/drums_oneshots"
+            ],
+            "sr": 44100,
+            "chunk_size": 65536,
+            "onset_thresh": 0.02,
+            "pre_pad": 512,
+            "peak_norm": true,
+            "fixed_split": true,
+            "types": [
+                "kick",
+                "snare",
+                "clap",
+                "hat",
+                "cymbal",
+                "tom",
+                "perc"
+            ],
+            "batch_size": 8,
+            "shuffle": true,
+            "validation_split": 0.0,
+            "num_workers": 4
+        }
+    },
+    "optimizer": {
+        "type": "Adam",
+        "args": {
+            "lr": 0.0003,
+            "weight_decay": 0,
+            "amsgrad": true
+        }
+    },
+    "loss": "raw_audio_vae_loss",
+    "metrics": [],
+    "lr_scheduler": {
+        "type": "StepLR",
+        "args": {
+            "step_size": 300,
+            "gamma": 0.5
+        }
+    },
+    "trainer": {
+        "type": "RawAudioVaeAdversarialTrainer",
+        "epochs": 1500,
+        "save_dir": "saved/",
+        "save_period": 10,
+        "verbosity": 2,
+        "monitor": "min val_loss",
+        "early_stop": 1500,
+        "tensorboardX": true,
+        "beta_max": 0.02,
+        "beta_warmup": 200,
+        "free_bits": 0.15,
+        "adv_start_epoch": 500,
+        "lambda_adv": 1.0,
+        "lambda_fm": 10.0,
+        "discriminator": "waveform",
+        "disc_capacity": 8,
+        "disc_lr": 0.0001,
+        "disc_update_every": 2,
+        "freeze_encoder": false
+    }
+}

@@ -1,4 +1,4 @@
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset
 from torchvision import datasets, transforms
 from base import BaseDataLoader
 from dataset import transformers, CollectData, NsynthSubset
@@ -63,15 +63,33 @@ class OneShotAudioDataLoader(BaseDataLoader):
     """DataLoader serving one fixed-length, attack-aligned chunk per file.
 
     For one-shot datasets (e.g. drum hits) where each file is a single event.
-    Extra kwargs (onset_thresh, pre_pad, peak_norm, extensions) pass through to
-    OneShotAudioDataset.
+    Extra kwargs (onset_thresh, pre_pad, peak_norm, extensions, types, packs)
+    pass through to OneShotAudioDataset.
+
+    With fixed_split=True, training uses the 'train' files and validation the
+    'val' files of the fixed hash split (validation_split is ignored), and the
+    'test' files are never loaded. `types` and `packs` filter both.
     """
     def __init__(self, data_dir, sr=22050, chunk_size=110080,
                  batch_size=8, shuffle=True, validation_split=0.1,
-                 num_workers=4, **kwargs):
+                 num_workers=4, fixed_split=False, **kwargs):
+        if not fixed_split:
+            self.dataset = OneShotAudioDataset(
+                path_to_dataset=data_dir, sr=sr, chunk_size=chunk_size, **kwargs)
+            self.val_dataset = None
+            super().__init__(self.dataset, batch_size, shuffle, validation_split, num_workers)
+            return
         self.dataset = OneShotAudioDataset(
-            path_to_dataset=data_dir, sr=sr, chunk_size=chunk_size, **kwargs)
-        super().__init__(self.dataset, batch_size, shuffle, validation_split, num_workers)
+            path_to_dataset=data_dir, sr=sr, chunk_size=chunk_size, split='train', **kwargs)
+        self.val_dataset = OneShotAudioDataset(
+            path_to_dataset=data_dir, sr=sr, chunk_size=chunk_size, split='val', **kwargs)
+        super().__init__(self.dataset, batch_size, shuffle, 0.0, num_workers)
+
+    def split_validation(self):
+        if self.val_dataset is None:
+            return super().split_validation()
+        kwargs = dict(self.init_kwargs, dataset=self.val_dataset, shuffle=False)
+        return DataLoader(**kwargs)
 
 
 class NsynthSubsetLoader(BaseDataLoader):
