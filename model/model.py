@@ -201,7 +201,9 @@ class RawAudioVAE(nn.Module):
             x = self.pqmf.analysis(x)               # (B, N, T//N)
         h      = self.encoder(x)                     # (B, C, T_lat)
         mu     = self.mu_proj(h)                     # (B, D, T_lat)
-        logvar = self.logvar_proj(h)
+        # Only guards exp() against overflow in the KL term and in sampling
+        # (std from e^-15 to e^10); it does not constrain normal training.
+        logvar = self.logvar_proj(h).clamp(-30.0, 20.0)
         z      = mu + torch.randn_like(mu) * (0.5 * logvar).exp()
         return mu, logvar, z
 

@@ -26,12 +26,15 @@ CONFIG="${1:?usage: sbatch train_vae_drums.sh <config.json>}"
 ml load system ffmpeg/7.1 system libsndfile/1.2.2
 
 export UV_CACHE_DIR="$SCRATCH/.uv_cache"
+export UV_LINK_MODE=copy    # cache (scratch) and venv (group home) are on different filesystems
 export PATH="$SCRATCH/bin:$HOME/.local/bin:$PATH"
 
 REPO_DIR="/home/users/nlabate/VAE/vae-audio"
 cd "$REPO_DIR"
 
-VENV_PATH="$SCRATCH/envs/vae_audio"
+# The venv lives in $GROUP_HOME, not $SCRATCH: scratch is purged after 90 days
+# and that breaks environments (pyvenv.cfg goes first).
+VENV_PATH="$GROUP_HOME/nlabate/envs/VAE/vae-audio"
 PY="$VENV_PATH/bin/python"
 mkdir -p "$(dirname "$VENV_PATH")"
 
@@ -41,7 +44,7 @@ mkdir -p "$(dirname "$VENV_PATH")"
     echo "Creating/verifying venv at $VENV_PATH..."
     uv venv "$VENV_PATH" --python 3.10 2>/dev/null || true
     echo "Syncing dependencies..."
-    uv pip install -r requirements.txt --python "$PY"
+    uv pip install -r requirements.txt -c requirements-lock.txt --python "$PY"
 ) 9>"$VENV_PATH.lock"
 
 echo "Job: $SLURM_JOB_ID  config: $CONFIG  commit: $(git rev-parse --short HEAD)"

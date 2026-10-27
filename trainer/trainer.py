@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+from torch.nn.utils import clip_grad_norm_
 from torchvision.utils import make_grid
 from base import BaseTrainer
 from model.model import MultiScaleDiscriminator, MultiScaleSpecDiscriminator
@@ -266,6 +267,11 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
         self.beta_warmup = cfg_adv.get('beta_warmup', 100)
         self.free_bits   = cfg_adv.get('free_bits',   0.25)
 
+        # Max gradient norm for the VAE and the discriminator (None = no clipping).
+        # Gradient norms are logged either way, and batches with a non-finite loss
+        # or gradient are skipped and counted.
+        self.grad_clip   = cfg_adv.get('grad_clip', None)
+
         # Adversarial hyper-parameters
         self.adv_start_epoch   = cfg_adv.get('adv_start_epoch', 50)
         self.lambda_adv        = cfg_adv.get('lambda_adv', 1.0)
@@ -337,12 +343,23 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
         total_loss = total_recon = total_kl = 0
         total_disc = total_gen_adv = total_fm = 0
 
+        # Stability diagnostics, logged once per epoch
+        skipped = disc_skipped = n_clipped = 0   # non-finite VAE batches / disc steps; clipped steps
+        grad_norms = []                  # VAE grad norm per step, before clipping
+        mu_abs_max, logvar_min, logvar_max = 0.0, float('inf'), float('-inf')
+
         for batch_idx, (data_idx, label, data) in enumerate(self.data_loader):
             x = data.float().to(self.device)
 
             # ── Forward VAE ──────────────────────────────────────────────
             y_hat, mu, logvar, z = self.model(x)
             loss_recon, loss_kl  = self.loss(x, y_hat, mu, logvar, free_bits=self.free_bits)
+
+            # A non-finite loss must not reach the discriminator or the optimizers.
+            if not (torch.isfinite(loss_recon).all() and torch.isfinite(loss_kl).all()):
+                skipped += 1
+                self._warn_skipped(epoch, batch_idx, skipped, 'non-finite loss')
+                continue
 
             if use_adv:
                 self._adv_step += 1
@@ -356,7 +373,13 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
 
                     self.disc_optimizer.zero_grad()
                     loss_disc.backward()
-                    self.disc_optimizer.step()
+                    disc_norm = clip_grad_norm_(self.disc.parameters(),
+                                                self.grad_clip or float('inf'))
+                    if torch.isfinite(disc_norm):
+                        self.disc_optimizer.step()
+                    else:
+                        disc_skipped += 1
+                        self._warn_skipped(epoch, batch_idx, disc_skipped, 'non-finite discriminator gradient')
                 else:
                     loss_disc = torch.tensor(0.0, device=x.device)
 
@@ -384,12 +407,30 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
                 vae_loss = loss_recon + beta * loss_kl
 
             self.optimizer.zero_grad()
-            vae_loss.backward()
+            step_ok = bool(torch.isfinite(vae_loss))
+            if step_ok:
+                vae_loss.backward()
+                # Returns the norm from before clipping; max_norm=inf only measures it.
+                grad_norm = clip_grad_norm_(self.model.parameters(),
+                                            self.grad_clip or float('inf'))
+                step_ok = bool(torch.isfinite(grad_norm))
+            if not step_ok:
+                skipped += 1
+                self._warn_skipped(epoch, batch_idx, skipped, 'non-finite loss or gradient')
+                continue
             self.optimizer.step()
+
+            grad_norm = float(grad_norm)
+            grad_norms.append(grad_norm)
+            n_clipped  += int(bool(self.grad_clip) and grad_norm > self.grad_clip)
+            mu_abs_max  = max(mu_abs_max,  mu.detach().abs().max().item())
+            logvar_min  = min(logvar_min,  logvar.detach().min().item())
+            logvar_max  = max(logvar_max,  logvar.detach().max().item())
 
             # ── Logging ──────────────────────────────────────────────────
             step = (epoch - 1) * len(self.data_loader) + batch_idx
             self.writer.set_step(step)
+            self.writer.add_scalar('grad_norm',  grad_norm)
             self.writer.add_scalar('loss',       vae_loss.item())
             self.writer.add_scalar('loss_recon', loss_recon.item())
             self.writer.add_scalar('loss_kl',    loss_kl.item())
@@ -416,23 +457,44 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
                         vae_loss.item(),
                         ' [adv ON]' if use_adv else ''))
 
-        n = len(self.data_loader)
+        n_batches = len(self.data_loader)
+        if skipped == n_batches:
+            # Weights are already non-finite (or the loss is): nothing is being learned.
+            raise RuntimeError(f'Epoch {epoch}: all {n_batches} batches were skipped as non-finite; '
+                               'stopping instead of silently training nothing.')
+        n = n_batches - skipped          # averages cover the batches that were used
         log = {
             'loss':       total_loss  / n,
             'loss_recon': total_recon / n,
             'loss_kl':    total_kl    / n,
             'beta':       self._beta(epoch),
+            'skipped':    skipped,
+            'grad_norm_mean': float(np.mean(grad_norms)),
+            'grad_norm_max':  max(grad_norms),
+            'mu_abs_max': mu_abs_max,
+            'logvar_min': logvar_min,
+            'logvar_max': logvar_max,
         }
+        if self.grad_clip:
+            log['clip_frac'] = n_clipped / n
         if use_adv:
             log['loss_disc']    = total_disc    / n
             log['loss_gen_adv'] = total_gen_adv / n
             log['loss_fm']      = total_fm      / n
+            log['disc_skipped'] = disc_skipped
+        if skipped or disc_skipped:
+            self.logger.warning(f'Epoch {epoch}: skipped {skipped}/{n_batches} batches and '
+                                f'{disc_skipped} discriminator steps (non-finite values).')
 
         if self.do_validation:
             log = {**log, **self._valid_epoch(epoch)}
         if self.lr_scheduler is not None:
             self.lr_scheduler.step()
         return log
+
+    def _warn_skipped(self, epoch, batch_idx, count, reason):
+        if count <= 5:                   # the per-epoch total is logged anyway
+            self.logger.warning(f'Epoch {epoch} batch {batch_idx}: skipped, {reason}.')
 
     def _valid_epoch(self, epoch):
         self.model.eval()

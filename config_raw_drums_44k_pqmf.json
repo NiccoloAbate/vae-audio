@@ -82,6 +82,7 @@
         "disc_capacity": 8,
         "disc_lr": 0.0001,
         "disc_update_every": 2,
-        "freeze_encoder": false
+        "freeze_encoder": false,
+        "grad_clip": 5.0
     }
 }

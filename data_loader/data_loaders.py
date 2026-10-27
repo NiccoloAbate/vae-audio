@@ -1,4 +1,6 @@
+import numpy as np
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.data.sampler import SubsetRandomSampler
 from torchvision import datasets, transforms
 from base import BaseDataLoader
 from dataset import transformers, CollectData, NsynthSubset
@@ -84,6 +86,15 @@ class OneShotAudioDataLoader(BaseDataLoader):
         self.val_dataset = OneShotAudioDataset(
             path_to_dataset=data_dir, sr=sr, chunk_size=chunk_size, split='val', **kwargs)
         super().__init__(self.dataset, batch_size, shuffle, 0.0, num_workers)
+
+    def _split_sampler(self, split):
+        if self.val_dataset is None or not self.shuffle:
+            return super()._split_sampler(split)
+        # Fixed split: shuffle via a SubsetRandomSampler over all training files.
+        # With no sampler, DataLoader builds a RandomSampler whose CPU generator
+        # fails under the 'torch.cuda.FloatTensor' default set in BaseTrainer.
+        self.shuffle = False            # mutually exclusive with a sampler
+        return SubsetRandomSampler(np.arange(self.n_samples)), None
 
     def split_validation(self):
         if self.val_dataset is None:

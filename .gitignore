@@ -107,6 +107,10 @@ saved/
 datasets/
 dataset/
 
+# slurm job logs
+*.out
+*.err
+
 # evaluation outputs
 eval/
 poster/*
