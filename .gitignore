@@ -114,6 +114,7 @@ dataset/
 
 # evaluation outputs
 eval/
+sweeps/
 poster/*
 !poster/poster.tex
 paper/*

@@ -45,8 +45,28 @@ class BaseTrainer:
         self.writer = WriterTensorboardX(config.log_dir, self.logger, cfg_trainer['tensorboardX'])
 
         self._resume_ckpt = None
+        self._finetune_ckpt = None
         if config.resume is not None:
             self._resume_checkpoint(config.resume)
+        elif cfg_trainer.get('finetune_from'):
+            self._load_finetune(cfg_trainer['finetune_from'])
+
+    def _load_finetune(self, path):
+        """Start from a checkpoint's weights only (trainer.finetune_from).
+
+        Unlike resuming, the optimizer, LR scheduler and epoch counter start
+        fresh from this config, so the fine-tune gets its own learning rate
+        and schedule instead of inheriting a decayed one; KL warmup and
+        adv_start_epoch count from epoch 1 too. Subclasses may also take
+        extra weights from self._finetune_ckpt (e.g. a discriminator).
+        """
+        self.logger.info("Fine-tuning from weights in: {} ...".format(path))
+        checkpoint = torch.load(str(path), map_location='cpu', weights_only=False)
+        if checkpoint['config']['arch'] != self.config['arch']:
+            self.logger.warning("Warning: architecture in config differs from the fine-tune "
+                                "checkpoint's; loading its weights will likely fail.")
+        self.model.load_state_dict(checkpoint['state_dict'])
+        self._finetune_ckpt = checkpoint
 
     @abstractmethod
     def _train_epoch(self, epoch):

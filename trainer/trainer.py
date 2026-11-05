@@ -319,6 +319,15 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
             elif ckpt['epoch'] >= self.adv_start_epoch:
                 self.logger.warning('Checkpoint has no discriminator state; the discriminator '
                                     'restarts from random weights.')
+        ft = self._finetune_ckpt
+        if ft is not None:
+            # weights only: the discriminator's optimizer starts fresh, like the VAE's
+            if 'disc' in ft:
+                self.disc.load_state_dict(ft['disc'])
+                self.logger.info('Discriminator weights taken from the fine-tune checkpoint.')
+            else:
+                self.logger.warning('Fine-tune checkpoint has no discriminator; it starts '
+                                    'from random weights.')
         super()._restore_extra_state()
 
     def _beta(self, epoch):

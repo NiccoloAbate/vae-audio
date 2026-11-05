@@ -11,6 +11,12 @@ toward another drum", perturb = "a new variation of this hit".
 Run:
     python app_drums.py                 # uses bank/drums_bank.pt + the drum checkpoint
     python app_drums.py -b <bank.pt> -r <checkpoint.pth> [--device cpu|mps|cuda] [--share]
+    python app_drums.py --directions sweeps/prototype/directions.pt   # + knob sliders
+
+Knob sliders (Tone, Snappy, ...) appear only with --directions: latent
+directions fit and calibrated by control_sweeps.py, applied after morph and
+perturbation. Slider units are the sweep's s (one = the change the direction
+promises, a std of the descriptor); the range is the sweep's safe range.
 """
 import argparse
 
@@ -43,20 +49,25 @@ def build_app(engine):
 
     a0, b0 = default_idx('kick', 0), default_idx('snare', 1)
 
-    def render(a_idx, b_idx, morph, use_slerp, sigma, seed):
+    knob_keys = list(getattr(engine, 'knobs', {}) or {})
+
+    def render(a_idx, b_idx, morph, use_slerp, sigma, seed, *knob_vals):
         za, zb = engine.z(int(a_idx)), engine.z(int(b_idx))
         fn = engine.slerp if use_slerp else engine.lerp
         z = fn(za, zb, torch.tensor(float(morph)))
         if sigma > 0:
             g = torch.Generator().manual_seed(int(seed))
             z = engine.perturb(z, float(sigma), g)
+        z = engine.steer(z, dict(zip(knob_keys, knob_vals))) if knob_keys else z
         w = engine.render(z).astype(np.float32)
+        turned = '  ' + ' '.join(f'{engine.knobs[k]["analogue"]}{v:+.1f}'
+                                 for k, v in zip(knob_keys, knob_vals) if v) if knob_keys else ''
 
         fig, ax = plt.subplots(2, 1, figsize=(7, 4), gridspec_kw={'height_ratios': [1, 2]})
         ax[0].plot(np.arange(len(w)) / engine.sr, w, lw=0.5, color='seagreen')
         ax[0].set_xlim(0, len(w) / engine.sr); ax[0].set_title(
             f'[{types[int(a_idx)]}] →({morph:.2f})→ [{types[int(b_idx)]}]'
-            f'{"  +noise" if sigma > 0 else ""}', fontsize=9)
+            f'{"  +noise" if sigma > 0 else ""}{turned}', fontsize=9)
         ax[0].set_ylim(-1.05, 1.05); ax[0].tick_params(labelsize=6)
         ax[1].imshow(_logspec(w), aspect='auto', origin='lower', cmap='magma')
         ax[1].set_xlabel('frame'); ax[1].set_ylabel('freq bin'); ax[1].tick_params(labelsize=6)
@@ -75,6 +86,22 @@ def build_app(engine):
             sigma = gr.Slider(0, 1.2, value=0.0, step=0.01, label='Perturbation σ (variation)')
             use_slerp = gr.Checkbox(value=False, label='Spherical (slerp)')
             seed = gr.Number(value=0, precision=0, label='Variation seed')
+        knob_sliders = []
+        if knob_keys:
+            gr.Markdown('**Knobs** — latent directions from the control sweeps '
+                        '(0 = unchanged; range = where steering stayed monotone)')
+            with gr.Row():
+                for k in knob_keys:
+                    d = engine.knobs[k]
+                    lo, hi = d['safe_range']
+                    info = f'measured slope {d["slope"]:.2f}, {d["monotone"]:.0%} monotone'
+                    if lo == hi:          # never steered reliably: offer the swept range
+                        lo, hi = engine.knob_grid
+                        info += ' (no reliable range: full sweep range shown)'
+                    _, desc, kind = k.split('/')
+                    knob_sliders.append(gr.Slider(
+                        lo, hi, value=0.0, step=0.25, label=f'{d["analogue"]} ({desc}, {kind})',
+                        info=info))
         with gr.Row():
             gen = gr.Button('▶ Generate', variant='primary')
             rand_pair = gr.Button('🔀 Random pair')
@@ -82,11 +109,11 @@ def build_app(engine):
         audio = gr.Audio(label='Output', autoplay=True)
         plot = gr.Plot(label='Waveform + spectrogram')
 
-        inputs = [a, b, morph, use_slerp, sigma, seed]
+        inputs = [a, b, morph, use_slerp, sigma, seed] + knob_sliders
         gen.click(render, inputs, [audio, plot])
         # live re-render when the sliders settle
-        morph.release(render, inputs, [audio, plot])
-        sigma.release(render, inputs, [audio, plot])
+        for sl in [morph, sigma] + knob_sliders:
+            sl.release(render, inputs, [audio, plot])
 
         def _random_pair():
             i, j = np.random.randint(0, len(types), 2)
@@ -106,6 +133,10 @@ def main():
     ap.add_argument('-r', '--resume', default='saved/models/DrumOneShots/checkpoint-epoch1500.pth')
     ap.add_argument('--decoder_pt', default=None)
     ap.add_argument('--device', default='cpu', help='cpu (default, most stable in a server), mps, or cuda')
+    ap.add_argument('--directions', default=None,
+                    help='directions.pt from control_sweeps.py: adds knob sliders')
+    ap.add_argument('--knobs', nargs='+', default=None,
+                    help="direction keys to expose (default: each knob's best usable one)")
     ap.add_argument('--share', action='store_true')
     ap.add_argument('--port', type=int, default=7860)
     args = ap.parse_args()
@@ -114,6 +145,11 @@ def main():
     engine = DrumEngine(checkpoint=args.resume, decoder_pt=args.decoder_pt,
                         bank=args.bank, device=device)
     print(f'Loaded bank {engine.bank["latents"].shape} on {device}')
+    if args.directions:
+        keys = engine.load_directions(args.directions, args.knobs)
+        if engine.knob_source and engine.knob_source != args.resume:
+            print(f'WARNING: directions were fit on {engine.knob_source}, not {args.resume}')
+        print(f'Knobs: {keys or "none passed the usability bar"}')
     build_app(engine).launch(server_port=args.port, share=args.share)
 
 

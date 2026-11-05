@@ -33,6 +33,18 @@ def get_device():
     return torch.device('cpu')
 
 
+def frame_activity(y, T, thresh_db=-50.0, dilate=2):
+    """(N, L) decoded audio -> (N, T) float mask of latent frames where it sounds
+    (frame RMS within thresh_db of the loudest frame, dilated by `dilate`)."""
+    N, L = y.shape
+    hop = L // T
+    rms = y[:, :hop * T].reshape(N, T, hop).pow(2).mean(2).sqrt()
+    m = (rms > rms.max(1, keepdim=True).values * 10 ** (thresh_db / 20)).float()
+    if dilate:
+        m = torch.nn.functional.max_pool1d(m.unsqueeze(1), 2 * dilate + 1, 1, dilate).squeeze(1)
+    return m
+
+
 class DrumEngine:
     def __init__(self, checkpoint=None, decoder_pt=None, bank=None, device=None):
         assert checkpoint or decoder_pt, 'need a checkpoint or a traced decoder'
@@ -94,6 +106,43 @@ class DrumEngine:
     @staticmethod
     def perturb(z, sigma, generator=None):
         return z + sigma * torch.randn(z.shape, generator=generator)
+
+    # ---- knobs (latent directions from control_sweeps.py) -----------------
+    def load_directions(self, path, keys=None, min_monotone=0.75, min_slope=0.1):
+        """Load knob directions. keys: e.g. ['active/brightness/pca']; by default,
+        per knob the steepest 'active' direction that steered at least
+        min_monotone of the swept hits the right way with slope >= min_slope.
+        Returns the chosen keys (self.knobs[key] holds vector + calibration)."""
+        d = torch.load(path, map_location='cpu', weights_only=False)
+        dirs = d['directions']
+        if keys is None:
+            keys = []
+            for k in d['knobs']:
+                ok = [(v['slope'], key) for key, v in dirs.items()
+                      if key.startswith(f'active/{k}/') and v['monotone'] >= min_monotone
+                      and v['slope'] >= min_slope]
+                if ok:
+                    keys.append(max(ok)[1])
+        self.knobs = {key: dirs[key] for key in keys}
+        self.knob_source = d.get('checkpoint')
+        self.knob_grid = (min(d['grid']), max(d['grid']))     # the range that was swept
+        return keys
+
+    def steer(self, z, values):
+        """z (D, T_lat) + sum of s * knob vector, for values {key: s}. 'active'
+        knobs only offset the frames where the hit sounds, as they were fit."""
+        values = {k: float(s) for k, s in values.items() if s}
+        if not values:
+            return z
+        mask = torch.ones(z.shape[-1])
+        if any(k.startswith('active/') for k in values):
+            y = torch.from_numpy(self.decode(z)).float().unsqueeze(0)
+            mask = frame_activity(y, z.shape[-1])[0]
+        out = z.clone()
+        for k, s in values.items():
+            m = mask if k.startswith('active/') else torch.ones_like(mask)
+            out = out + s * self.knobs[k]['vector'][:, None] * m[None, :]
+        return out
 
     # ---- decode / render --------------------------------------------------
     def decode(self, z):
