@@ -12,6 +12,9 @@
 #   sbatch --job-name=snare    train_vae.sh config_raw_drums_22k_snare.json
 #   sbatch --job-name=snare_ft train_vae.sh config_raw_drums_22k_snare_ft.json
 #   sbatch --job-name=22k_steps train_vae.sh config_raw_drums_22k_steps.json
+#   44k beta sweep (latent collapse): config_raw_drums_44k_{b002,b005,b01}.json
+#   for b in b002 b005 b01; do sbatch --job-name=44k_$b train_vae.sh config_raw_drums_44k_$b.json; done
+#   sbatch --job-name=44k_snare train_vae.sh config_raw_drums_44k_snare.json
 # Extra arguments are passed to train.py (e.g. -r <checkpoint> to resume).
 
 set -e

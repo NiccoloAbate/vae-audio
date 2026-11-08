@@ -508,6 +508,7 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
     def _valid_epoch(self, epoch):
         self.model.eval()
         total_val_loss = total_val_recon = total_val_kl = 0
+        kl_dim = 0                       # unclamped KL per latent dim, to watch for collapse
 
         with torch.no_grad():
             for batch_idx, (data_idx, label, data) in enumerate(self.valid_data_loader):
@@ -515,6 +516,7 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
                 y_hat, mu, logvar, z = self.model(x)
                 loss_recon, loss_kl  = self.loss(x, y_hat, mu, logvar, free_bits=self.free_bits)
                 loss = loss_recon + self.beta_max * loss_kl
+                kl_dim = kl_dim + (0.5 * (mu.pow(2) + logvar.exp() - 1 - logvar)).mean((0, 2))
 
                 self.writer.set_step(
                     (epoch - 1) * len(self.valid_data_loader) + batch_idx, 'valid')
@@ -523,15 +525,20 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
                 total_val_recon += loss_recon.item()
                 total_val_kl    += loss_kl.item()
 
+        n = len(self.valid_data_loader)
+        kl_dim = (kl_dim / n).cpu()
         if epoch % 10 == 0:
             for name, p in self.model.named_parameters():
                 self.writer.add_histogram(name, p, bins='auto')
-
-        n = len(self.valid_data_loader)
+            for d, v in enumerate(kl_dim.tolist()):
+                self.writer.add_scalar(f'kl_dim/{d:02d}', v)
+        top2 = kl_dim.sort(descending=True).values[:2].sum() / kl_dim.sum().clamp_min(1e-8)
         return {
             'val_loss':       total_val_loss  / n,
             'val_loss_recon': total_val_recon / n,
             'val_loss_kl':    total_val_kl    / n,
+            'val_kl_dims':    int((kl_dim > 0.2).sum()),     # dims clearly above free bits
+            'val_kl_top2':    float(top2),                   # share of KL in the top 2 dims
         }
 
 

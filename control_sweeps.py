@@ -18,8 +18,10 @@ frames within 40 dB of the loudest one.
    Variants: 'ridge' uses all latent dims; 'pca' fits only within the top
    --pcs principal components of the pooled latent (where the decoder's real
    variation lives; dims that correlate with a descriptor but that the
-   decoder ignores can't absorb the direction); 'single' is the one latent
-   dim most correlated with the descriptor (baseline).
+   decoder ignores can't absorb the direction); 'kl' fits only within the
+   dims whose mean KL exceeds --kl_thresh (above the free-bits floor, i.e.
+   the dims the decoder uses; needed when the latent has partly collapsed);
+   'single' is the one latent dim most correlated with the descriptor.
 2. Sweep: on test hits, add s*v to the latent for s in --grid, decode, and
    re-measure every descriptor.
      slope       measured change in the target per unit s (1 = as promised)
@@ -107,14 +109,15 @@ def desc_array(waves, sr):
 # ---------------------------------------------------------------------------
 
 def encode_decode(model, ds, idxs, device, bs=16):
-    """Posterior means (N, D, T), decoded recon (N, L) on CPU."""
-    mus, ys = [], []
+    """Posterior means and log-variances (N, D, T), decoded recon (N, L), on CPU."""
+    mus, lvs, ys = [], [], []
     with torch.no_grad():
         for s in range(0, len(idxs), bs):
             x = torch.stack([ds[i][2] for i in idxs[s:s + bs]]).to(device)
-            mu = model.encode(x)[0]
-            mus.append(mu.cpu()); ys.append(model.decode(mu).squeeze(1).cpu())
-    return torch.cat(mus), torch.cat(ys)
+            mu, lv, _ = model.encode(x)
+            mus.append(mu.cpu()); lvs.append(lv.cpu())
+            ys.append(model.decode(mu).squeeze(1).cpu())
+    return torch.cat(mus), torch.cat(lvs), torch.cat(ys)
 
 
 def decode(model, z, device, bs=16):
@@ -137,9 +140,10 @@ def cv_r2(X, y):
     return float(1 - ((y - pred) ** 2).sum() / ((y - y.mean()) ** 2).sum())
 
 
-def fit_directions(X, Y, pcs):
+def fit_directions(X, Y, pcs, active):
     """X (N, D) pooled latents, Y (N, K) standardised descriptors -> per knob:
-    ridge (all dims), pca (ridge in the top `pcs` PCs), and best single dim."""
+    ridge (all dims), pca (ridge in the top `pcs` PCs), kl (ridge on the
+    `active` dims only), and best single dim."""
     out = {}
     Xc = X - X.mean(0)
     U = np.linalg.svd(Xc, full_matrices=False)[2][:pcs].T          # (D, pcs)
@@ -148,14 +152,17 @@ def fit_directions(X, Y, pcs):
         beta = RidgeCV(alphas=np.logspace(-3, 3, 13)).fit(X, y).coef_
         gamma = RidgeCV(alphas=np.logspace(-3, 3, 13)).fit(Xc @ U, y).coef_
         beta_pca = U @ gamma
+        beta_kl = np.zeros_like(beta)
+        beta_kl[active] = RidgeCV(alphas=np.logspace(-3, 3, 13)).fit(X[:, active], y).coef_
         corr = np.array([np.corrcoef(X[:, d], y)[0, 1] for d in range(X.shape[1])])
         d = int(np.nanargmax(np.abs(corr)))
         a = np.polyfit(X[:, d], y, 1)[0]                          # y_std per unit of dim d
         single = np.zeros_like(beta); single[d] = 1.0 / a
         out[k] = {'ridge': beta / (beta @ beta), 'pca': beta_pca / (beta_pca @ beta_pca),
+                  'kl': beta_kl / (beta_kl @ beta_kl),
                   'single': single, 'single_dim': d, 'single_r': float(corr[d]),
                   'r2_cv': {'ridge': cv_r2(X, y), 'pca': cv_r2(Xc @ U, y),
-                            'single': cv_r2(X[:, [d]], y)}}
+                            'kl': cv_r2(X[:, active], y), 'single': cv_r2(X[:, [d]], y)}}
     return out
 
 
@@ -206,8 +213,14 @@ def main(args):
     print(f'{args.resume} (epoch {epoch}) on {device}: fit on {len(fit_rel)}, sweep {len(test_rel)} hits')
 
     print('Encoding fit set…')
-    mu_fit, y_fit = encode_decode(model, fit_ds, list(range(len(fit_ds))), device)
+    mu_fit, lv_fit, y_fit = encode_decode(model, fit_ds, list(range(len(fit_ds))), device)
     T = mu_fit.shape[2]
+    kl_dim = (0.5 * (mu_fit.pow(2) + lv_fit.exp() - 1 - lv_fit)).mean((0, 2)).numpy()
+    active = np.nonzero(kl_dim > args.kl_thresh)[0]
+    if len(active) == 0:
+        active = np.argsort(kl_dim)[-2:]
+    print(f'  dims above KL {args.kl_thresh}: {list(active)} (of {len(kl_dim)})')
+    del lv_fit
     Y_raw = desc_array(y_fit.numpy(), sr)
     keep = ~np.isnan(Y_raw).any(1)
     mean, std = Y_raw[keep].mean(0), Y_raw[keep].std(0)
@@ -216,7 +229,7 @@ def main(args):
           ', '.join(f'{k}={m:.2f}±{s:.2f}' for k, m, s in zip(KNOBS, mean, std)))
 
     print('Encoding sweep set…')
-    mu_t, y_t = encode_decode(model, test_ds, list(range(len(test_ds))), device)
+    mu_t, _, y_t = encode_decode(model, test_ds, list(range(len(test_ds))), device)
     grid = args.grid
     i0 = grid.index(0.0)
 
@@ -224,12 +237,12 @@ def main(args):
     for mode in args.modes:
         m_fit = frame_activity(y_fit, T) if mode == 'active' else torch.ones(len(mu_fit), T)
         m_t = frame_activity(y_t, T) if mode == 'active' else torch.ones(len(mu_t), T)
-        dirs = fit_directions(pool(mu_fit, m_fit)[keep].numpy(), Y[keep], args.pcs)
+        dirs = fit_directions(pool(mu_fit, m_fit)[keep].numpy(), Y[keep], args.pcs, active)
         D0 = (desc_array(y_t.numpy(), sr) - mean) / std
         fig, axes = plt.subplots(
-            3, len(KNOBS), figsize=(4 * len(KNOBS), 10), sharey=True, squeeze=False)
+            4, len(KNOBS), figsize=(4 * len(KNOBS), 13), sharey=True, squeeze=False)
         for j, k in enumerate(KNOBS):
-            for row, kind in enumerate(['ridge', 'pca', 'single']):
+            for row, kind in enumerate(['ridge', 'pca', 'kl', 'single']):
                 v = torch.tensor(dirs[k][kind], dtype=torch.float32)
                 Ds = []
                 for s in grid:
@@ -253,10 +266,10 @@ def main(args):
                 ax.set_xlabel('knob s (std units)')
                 if j == 0: ax.set_ylabel('mean change (std units)')
                 if j == 0 and row == 0: ax.legend(fontsize=7)
+                directions[f'{mode}/{k}/{kind}'] = {
+                    'vector': v, 'mean': float(mean[j]), 'std': float(std[j]), **met,
+                    'r2_cv': dirs[k]['r2_cv'][kind], 'analogue': ANALOGUE[k]}
                 if kind != 'single':
-                    directions[f'{mode}/{k}/{kind}'] = {
-                        'vector': v, 'mean': float(mean[j]), 'std': float(std[j]), **met,
-                        'r2_cv': dirs[k]['r2_cv'][kind], 'analogue': ANALOGUE[k]}
                     if args.n_audio and mode == 'active':
                         write_strips(model, mu_t, m_t, v, grid, test_rel, test_ds,
                                      os.path.join(out_dir, 'audio', kind), k, sr, device,
@@ -292,6 +305,8 @@ def write_strips(model, mu, mask, v, grid, rel, ds, out_dir, knob, sr, device, n
     for i, l in enumerate(ds.labels):
         by_type[l].append(i)
     picks = [ix[0] for _, ix in sorted(by_type.items())][:n]
+    rest = [i for i in range(len(ds.labels)) if i not in picks]   # single-type sets: more hits
+    picks += rest[:n - len(picks)]
     gap = np.zeros(int(0.3 * sr), dtype=np.float32)
     for i in picks:
         z = torch.stack([mu[i] + s * v[:, None] * mask[i][None, :] for s in grid])
@@ -321,6 +336,8 @@ if __name__ == '__main__':
     p.add_argument('--pcs', type=int, default=8,
                    help="principal components for the 'pca' directions (per-hit PCA "
                         "needed ~7 for 95%% variance on the prototype)")
+    p.add_argument('--kl_thresh', type=float, default=0.2,
+                   help="nats; 'kl' directions use only dims with mean KL above this")
     p.add_argument('--n_audio', type=int, default=7, help='hits per knob to write as sweep strips')
     p.add_argument('-d', '--device')
     p.add_argument('--seed', type=int, default=0)

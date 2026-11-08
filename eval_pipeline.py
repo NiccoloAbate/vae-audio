@@ -7,6 +7,10 @@ Two ways in:
     --audio_dir DIR  any other system (DSP baseline, DrumBlender, diffusion)
                      that has written one wav per test file, named
                      flat_name(relpath), i.e. the path with '/' -> '__'.
+    --gen_dir DIR    an unpaired *generated* set (generate_set.py,
+                     gen_stable_audio.py): preprocessed like the reference,
+                     then scored with FAD only, since there is no paired
+                     target. Timing comes from DIR/timing.json if present.
 
 Every system is scored at ONE evaluation rate and length (default 44.1 kHz,
 65536 samples ~ 1.49 s) against the same reference audio, whatever its native
@@ -89,7 +93,7 @@ RESULT_FIELDS = ['name', 'mode', 'checkpoint', 'epoch', 'native_sr', 'eval_sr', 
                  'split', 'n', 'test_clean', 'stft', 'stft_native', 'lat_med', 'lat_within2',
                  'lat_bias', 'fad_model', 'fad', 'fad_inf_r2', 'rtf_cpu', 'decode_ms_cpu',
                  'pca_hit_95', 'pca_frame_95', 'kl_dims', 'trunc_k90', 'kl_total',
-                 'timestamp']
+                 'gen_ms_per_hit', 'gen_device', 'timestamp']
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +144,20 @@ def to_eval(w, sr, eval_sr, eval_len):
 
 def write_wav(path, w, sr):
     sf.write(path, np.clip(w, -1.0, 1.0), sr, subtype='PCM_16')
+
+
+def prepare_gen_dir(src, dst, eval_sr, eval_len):
+    """Every audio file under src -> dst/<basename>.wav through the reference's
+    preprocessing (mono, onset alignment, peak norm, pad/crop at eval_sr)."""
+    ds = OneShotAudioDataset(src, sr=eval_sr, chunk_size=eval_len,
+                             pre_pad=int(round(256 / 22050 * eval_sr)))
+    if os.path.isdir(dst):
+        shutil.rmtree(dst)
+    os.makedirs(dst)
+    for i, f in enumerate(ds.files):
+        name = os.path.splitext(os.path.basename(f))[0] + '.wav'
+        write_wav(os.path.join(dst, name), ds[i][2].squeeze(0).numpy(), eval_sr)
+    return len(ds.files)
 
 
 def build_reference(data_dir, rel_files, ref_dir, eval_sr, eval_len):
@@ -427,6 +445,16 @@ def per_type_table(labels, rows, out_path):
 
 def append_result(path, row):
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    if os.path.isfile(path):                    # columns added since: rewrite the header
+        with open(path) as f:
+            old = list(csv.DictReader(f))
+        with open(path) as f:
+            header = f.readline().strip().split(',')
+        if header != RESULT_FIELDS:
+            with open(path, 'w', newline='') as f:
+                w = csv.DictWriter(f, fieldnames=RESULT_FIELDS)
+                w.writeheader()
+                w.writerows({k: r.get(k, '') for k in RESULT_FIELDS} for r in old)
     new = not os.path.isfile(path)
     with open(path, 'a', newline='') as f:
         w = csv.DictWriter(f, fieldnames=RESULT_FIELDS)
@@ -482,6 +510,28 @@ def main(args):
                                      'split': split, 'n': len(rel_files), 'fad_model': args.fad_model,
                                      'fad': fad, 'fad_inf_r2': r2,
                                      'timestamp': time.strftime('%Y-%m-%d %H:%M')})
+        return
+
+    if args.gen_dir:
+        out_dir = args.out_dir or os.path.join('eval', 'gen', args.name)
+        audio_dir = os.path.join(out_dir, 'audio')
+        n = prepare_gen_dir(args.gen_dir, audio_dir, args.eval_sr, args.eval_len)
+        print(f'{n} generated hits preprocessed -> {audio_dir}')
+        fad, r2 = run_fad(args.fadtk, args.fad_model, ref_dir, audio_dir,
+                          os.path.join(os.path.dirname(args.results), 'fad_raw.csv'),
+                          args.fad_inf, args.sox_path)
+        row = {'name': args.name, 'mode': 'generation', 'eval_sr': args.eval_sr,
+               'eval_len': args.eval_len, 'split': split, 'n': n, 'fad_model': args.fad_model,
+               'fad': fad, 'fad_inf_r2': r2, 'timestamp': time.strftime('%Y-%m-%d %H:%M')}
+        tj = os.path.join(args.gen_dir, 'timing.json')
+        if os.path.isfile(tj):
+            with open(tj) as f:
+                t = json.load(f)
+            sec = t.get('decode_sec_per_hit_median', t.get('sec_per_hit_batch1_median'))
+            row.update(gen_ms_per_hit=sec * 1000 if sec else '', gen_device=t.get('device', ''),
+                       checkpoint=t.get('checkpoint', t.get('model', '')), epoch=t.get('epoch', ''))
+        append_result(args.results, row)
+        print(f'FAD {fad:.4f}  (n={n})')
         return
 
     out_dir = args.out_dir or os.path.join('eval', 'milestone', args.name)
@@ -569,6 +619,7 @@ if __name__ == '__main__':
     src.add_argument('--fad_only', action='store_true',
                      help='(re)compute only FAD for an existing <out_dir>/audio and '
                           'fill it into that run\'s row in --results')
+    src.add_argument('--gen_dir', help='unpaired generated set to score with FAD (see docstring)')
     src.add_argument('--fad_sanity', action='store_true',
                      help='FAD between real test and real val audio, then exit')
     p.add_argument('-c', '--config', help='config json (default: beside the checkpoint)')
@@ -595,6 +646,6 @@ if __name__ == '__main__':
     args = p.parse_args()
     if not args.fad_sanity and not args.name:
         p.error('--name is required')
-    if (args.fad_sanity or args.fad_only) and not args.fadtk:
+    if (args.fad_sanity or args.fad_only or args.gen_dir) and not args.fadtk:
         p.error('--fadtk is required for FAD modes')
     main(args)

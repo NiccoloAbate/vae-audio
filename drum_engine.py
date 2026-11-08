@@ -63,6 +63,8 @@ class DrumEngine:
             self._decode_raw = lambda z: self._vae.decode(z)
 
         dl = dict(ck['config']['data_loader']['args']) if ck else {}
+        self._preprocess = dict(onset_thresh=dl.get('onset_thresh', 0.02),
+                                pre_pad=dl.get('pre_pad', 256), peak_norm=dl.get('peak_norm', True))
         self.sr = dl.get('sr', 22050)
         self.chunk_size = dl.get('chunk_size', 110080)
 
@@ -83,6 +85,20 @@ class DrumEngine:
     def z(self, idx):
         """Latent (D, T_lat) for bank slot idx."""
         return self.bank['latents'][idx].clone()
+
+    def original(self, idx, **trim_kw):
+        """The bank slot's source file as the model saw it (mono, onset-aligned,
+        peak-normalised, cut to the model's window), trimmed like render(): the
+        reference to compare a reconstruction against. None if the file is gone."""
+        import os
+        from dataset.datasets import OneShotAudioDataset
+        path = self.bank['files'][idx]
+        if not os.path.isfile(path):
+            return None
+        ds = OneShotAudioDataset(os.path.dirname(path), sr=self.sr, chunk_size=self.chunk_size,
+                                 **self._preprocess)
+        ds.files = [path]
+        return self.trim(ds[0][2].squeeze(0).numpy(), **trim_kw)
 
     def indices_of(self, drum_type):
         return [i for i, t in enumerate(self.bank['types']) if t == drum_type]
@@ -128,12 +144,41 @@ class DrumEngine:
         self.knob_grid = (min(d['grid']), max(d['grid']))     # the range that was swept
         return keys
 
+    def fit_explore(self, n_pcs=4, n_dims=4):
+        """Unlabelled directions to explore by ear, from the bank itself: the
+        top principal components of the bank's latents (each averaged over its
+        sounding frames) and the n_dims raw latent dims that vary most across
+        the bank. Each vector is one bank std long, so s = 1 moves a hit by
+        about as much as hits differ along it. Keys: active/pc/<k>, active/dim/<d>."""
+        Z = self.bank['latents']
+        y = torch.from_numpy(self.decode(Z)).float()
+        m = frame_activity(y, Z.shape[-1])                               # (N, T)
+        X = (Z * m[:, None]).sum(2) / m.sum(1, keepdim=True).clamp_min(1)   # (N, D)
+        Xc = X - X.mean(0)
+        _, S, Vt = torch.linalg.svd(Xc, full_matrices=False)
+        std = S / max(len(X) - 1, 1) ** 0.5
+        var = (S ** 2) / (S ** 2).sum()
+        self.explore = {}
+        for k in range(min(n_pcs, len(S))):
+            self.explore[f'active/pc/{k + 1}'] = {
+                'vector': std[k] * Vt[k], 'analogue': f'PC{k + 1}',
+                'info': f'{var[k]:.0%} of the bank\'s latent variance'}
+        dstd = X.std(0)
+        for d in dstd.argsort(descending=True)[:n_dims].tolist():
+            v = torch.zeros(X.shape[1]); v[d] = dstd[d]
+            self.explore[f'active/dim/{d}'] = {
+                'vector': v, 'analogue': f'dim {d}',
+                'info': f'raw latent dim {d} (bank std {dstd[d]:.2f})'}
+        return list(self.explore)
+
     def steer(self, z, values):
-        """z (D, T_lat) + sum of s * knob vector, for values {key: s}. 'active'
-        knobs only offset the frames where the hit sounds, as they were fit."""
+        """z (D, T_lat) + sum of s * knob vector, for values {key: s}, over the
+        knobs and the explore directions. 'active' keys only offset the frames
+        where the hit sounds, as they were fit."""
         values = {k: float(s) for k, s in values.items() if s}
         if not values:
             return z
+        dirs = {**(getattr(self, 'knobs', None) or {}), **(getattr(self, 'explore', None) or {})}
         mask = torch.ones(z.shape[-1])
         if any(k.startswith('active/') for k in values):
             y = torch.from_numpy(self.decode(z)).float().unsqueeze(0)
@@ -141,7 +186,7 @@ class DrumEngine:
         out = z.clone()
         for k, s in values.items():
             m = mask if k.startswith('active/') else torch.ones_like(mask)
-            out = out + s * self.knobs[k]['vector'][:, None] * m[None, :]
+            out = out + s * dirs[k]['vector'][:, None] * m[None, :]
         return out
 
     # ---- decode / render --------------------------------------------------
@@ -160,7 +205,10 @@ class DrumEngine:
         trim_db: cut once the signal stays this many dB below its peak.
         tail_ms: keep this much release after the last loud sample.
         """
-        w = self.decode(z)
+        return self.trim(self.decode(z), trim_db, tail_ms, normalize)
+
+    def trim(self, w, trim_db=-45.0, tail_ms=60.0, normalize=True):
+        """Cut trailing silence (see render) and optionally peak-normalise."""
         env = np.abs(w)
         peak = env.max()
         if peak > 0:
