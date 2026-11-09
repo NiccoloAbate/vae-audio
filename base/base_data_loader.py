@@ -24,6 +24,9 @@ class BaseDataLoader(DataLoader):
             'collate_fn': collate_fn,
             'num_workers': num_workers,
             'multiprocessing_context': 'spawn' if num_workers > 0 else None,
+            # Spawned workers re-import torch etc. on every iterator; for short epochs
+            # that restart dominated the run time. Keep them alive across epochs.
+            'persistent_workers': num_workers > 0,
         }
         super(BaseDataLoader, self).__init__(sampler=self.sampler, **self.init_kwargs)
 

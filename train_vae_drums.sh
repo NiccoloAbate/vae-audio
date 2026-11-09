@@ -27,6 +27,9 @@ ml load system ffmpeg/7.1 system libsndfile/1.2.2
 
 export UV_CACHE_DIR="$SCRATCH/.uv_cache"
 export UV_LINK_MODE=copy    # cache (scratch) and venv (group home) are on different filesystems
+# DataLoader workers now persist across epochs (16 processes alive); keep each one's
+# BLAS pool at 1 thread so the per-user task limit on the node is never an issue.
+export OPENBLAS_NUM_THREADS=1
 export PATH="$SCRATCH/bin:$HOME/.local/bin:$PATH"
 
 REPO_DIR="/home/users/nlabate/VAE/vae-audio"
