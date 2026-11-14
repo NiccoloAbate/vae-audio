@@ -10,6 +10,8 @@ Modes:
              (drum_engine.morph_aligned; same pairs and t for every mode)
     perturb  VAE: one training hit's latent + N(0, sigma) noise on the frames
              where the hit sounds (silent frames left alone, as for the knobs)
+    stretch  VAE: one training hit with its tail stretched (drum_engine.stretch_tail)
+             by r = 2^U(-1, 1): what re-timing alone costs in realism
     real     no model: the training hits themselves (the "sample library"
              reference: the realism of just picking real samples)
 
@@ -37,7 +39,8 @@ import soundfile as sf
 import torch
 
 from drum_types import classify
-from drum_engine import frame_activity, hit_timing, morph_aligned, silence_latent
+from drum_engine import frame_activity, frame_rms, hit_timing, morph_aligned, silence_latent, \
+    stretch_tail
 from eval_pipeline import load_checkpoint, read_split, make_dataset
 
 
@@ -80,7 +83,7 @@ def main(args):
                    peak_norm=dl.get('peak_norm', True))
         lat = []
         z_sil = None
-        if args.mode == 'interp' and args.interp_mode != 'blend':
+        if args.mode == 'stretch' or (args.mode == 'interp' and args.interp_mode != 'blend'):
             # silence latent for re-timed tails that run past the window: from the
             # first 64 training hits (fixed, so the rng draws match every mode)
             ds = make_dataset(args.data_dir, train[:64], sr, chunk, **pre)
@@ -103,8 +106,15 @@ def main(args):
                             pk, en = hit_timing(model.decode(mu).squeeze(1).cpu(), mu.shape[-1])
                             m = mu.cpu()
                             z = morph_aligned(m[0], m[1], (pk[0], en[0]), (pk[1], en[1]), a,
-                                              args.interp_mode, pad=z_sil)[None].to(device)
+                                              args.interp_mode, pad=z_sil,
+                                              nearest=args.nearest)[None].to(device)
                         info = f'{srcs[0]} | {srcs[1]} | t={a:.3f}'
+                    elif args.mode == 'stretch':
+                        r = 2 ** rng.uniform(-1, 1)
+                        y0 = model.decode(mu).squeeze(1).cpu()
+                        piv = frame_rms(y0, mu.shape[-1]).argmax(1) + 2
+                        z = stretch_tail(mu.cpu(), piv, r, pad=z_sil).to(device)
+                        info = f'{srcs[0]} | r={r:.3f}'
                     else:
                         y0 = model.decode(mu).squeeze(1).cpu()
                         m = frame_activity(y0, mu.shape[-1]).to(device)
@@ -117,7 +127,8 @@ def main(args):
                 sf.write(os.path.join(args.out_dir, name), y, sr, subtype='FLOAT')
                 rows.append({'file': name, 'type': t, 'sources': info})
         timing = {'checkpoint': args.resume, 'epoch': epoch, 'device': args.device,
-                  'mode': args.mode, 'interp_mode': args.interp_mode, 'n': len(rows), 'sample_rate': sr,
+                  'mode': args.mode, 'interp_mode': args.interp_mode, 'nearest': args.nearest,
+                  'n': len(rows), 'sample_rate': sr,
                   'chunk_s': chunk / sr, 'decode_sec_per_hit_median': float(np.median(lat[3:]))}
         with open(os.path.join(args.out_dir, 'timing.json'), 'w') as f:
             json.dump(timing, f, indent=1)
@@ -132,7 +143,7 @@ def main(args):
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser(description='Matched generation set for unpaired FAD')
-    p.add_argument('--mode', required=True, choices=['interp', 'perturb', 'real'])
+    p.add_argument('--mode', required=True, choices=['interp', 'perturb', 'stretch', 'real'])
     p.add_argument('-r', '--resume', help='checkpoint (interp / perturb)')
     p.add_argument('--data_dir', required=True)
     p.add_argument('--split_file', default='splits/test.txt', help='type mix to match')
@@ -140,9 +151,10 @@ if __name__ == '__main__':
     p.add_argument('-o', '--out_dir', required=True)
     p.add_argument('--sigma', type=float, default=0.5)
     p.add_argument('--interp_mode', default='blend', choices=['blend', 'aligned', 'tail', 'crossover'])
+    p.add_argument('--nearest', action='store_true', help='re-timing reads whole frames only')
     p.add_argument('-d', '--device', default='cpu')
     p.add_argument('--seed', type=int, default=0)
     args = p.parse_args()
     if args.mode != 'real' and not args.resume:
-        p.error('--resume is required for interp / perturb')
+        p.error('--resume is required for the VAE modes')
     main(args)

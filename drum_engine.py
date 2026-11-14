@@ -58,14 +58,17 @@ def frame_rms(y, T):
 # ---- latent surgery: the latent is a sequence of frames in time, so a hit can
 # be re-timed by reading it at warped positions (src) instead of t.
 
-def warp(z, src, pad=None, fade=8):
+def warp(z, src, pad=None, fade=8, nearest=False):
     """Read z (N, D, T) at fractional frame positions src (N, T), linearly
     interpolating between frames. Positions before 0 read frame 0 (pre-onset).
     Positions past the end repeat the last frame, or, with `pad` (D,) a silence
     latent, fade into it over `fade` source frames, as if the hit died away just
-    past the window (a hit still ringing there would otherwise freeze into a drone)."""
+    past the window (a hit still ringing there would otherwise freeze into a drone).
+    nearest=True reads whole frames only (no blends of neighbouring frames)."""
     N, D, T = z.shape
     s = src.to(z.device).clamp(0, T - 1)
+    if nearest:
+        s = s.round()
     lo = s.floor().long()
     hi = (lo + 1).clamp(max=T - 1)
     w = (s - lo)[:, None, :]
@@ -97,11 +100,14 @@ def hold_peak(z, peak, k, pad=None, fade=8):
     return warp(z, src, pad, fade)
 
 
-def hit_timing(y, T):
-    """Peak frame and last sounding frame per hit, (N,) each, from decoded audio y (N, L)."""
-    peak = frame_rms(y, T).argmax(1)
-    act = frame_activity(y, T)
-    end = (act * torch.arange(T)).argmax(1)               # last active frame
+def hit_timing(y, T, thresh_db=-30.0):
+    """Peak frame and the last frame within thresh_db of it, (N,) each, from decoded
+    audio y (N, L). -30 dB as in the decay descriptor: lower thresholds catch the
+    faint noise / reverb floor, which reaches the window end for many hats and kicks."""
+    rms = frame_rms(y, T)
+    peak = rms.argmax(1)
+    loud = rms >= rms.max(1, keepdim=True).values * 10 ** (thresh_db / 20)
+    end = (loud * torch.arange(T)).argmax(1)
     return peak, torch.maximum(end, peak + 1)
 
 
@@ -122,7 +128,7 @@ def ramp(t, centre, width):
 MORPH_MODES = ['blend', 'slerp', 'aligned', 'tail', 'crossover']
 
 
-def morph_aligned(za, zb, ta, tb, alpha, mode, width=4.0, pad=None):
+def morph_aligned(za, zb, ta, tb, alpha, mode, width=4.0, pad=None, nearest=False):
     """Shape-aware morphs of za, zb (D, T) with timings ta, tb = (peak, end) frames.
       aligned    both hits re-timed to the in-between peak frame and tail length
                  (tail lengths interpolate geometrically), then blended by alpha
@@ -139,8 +145,8 @@ def morph_aligned(za, zb, ta, tb, alpha, mode, width=4.0, pad=None):
     La, Lb = (ea - pa).float(), (eb - pb).float()
     L = torch.exp((1 - a) * La.log() + a * Lb.log())
     p = pa.float() if mode == 'tail' else (1 - a) * pa.float() + a * pb.float()
-    Za = warp(za[None], align_src(pa, ea, p, L, T), pad)[0]
-    Zb = warp(zb[None], align_src(pb, eb, p, L, T), pad)[0]
+    Za = warp(za[None], align_src(pa, ea, p, L, T), pad, nearest=nearest)[0]
+    Zb = warp(zb[None], align_src(pb, eb, p, L, T), pad, nearest=nearest)[0]
     t = torch.arange(T, dtype=torch.float32)
     if mode == 'aligned':
         c = torch.full((T,), a)
