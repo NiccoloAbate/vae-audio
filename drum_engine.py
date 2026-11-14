@@ -9,7 +9,9 @@ transient event, so the interesting controls live in latent space:
     decode      z (D, T_lat)            -> waveform
     lerp/slerp  (z_a, z_b, t)           -> morph between two hits
     perturb     (z, sigma)              -> a variation of a hit
+    morph       (a, b, t, mode)         -> also shape-aware: re-timed, tail-only, crossover
     stretch     (z, factor)             -> same hit, tail resampled in time (decay)
+    punch       (z, frames)             -> same hit, its peak held longer
     render      z -> trimmed, normalised one-shot ready to trigger
 
 `velocity`-style automation is just interpolation with t driven by a control
@@ -53,28 +55,106 @@ def frame_rms(y, T):
     return y[:, :hop * T].reshape(N, T, hop).pow(2).mean(2).sqrt()
 
 
-def stretch_tail(z, pivot, r, pad=None, fade=8):
-    """Resample the latent frames after `pivot` by factor r (> 1 = longer tail):
-    output frame t > pivot reads input position pivot + (t - pivot) / r, linearly
-    interpolated. z (N, D, T), pivot (N,) frame indices; frames up to the pivot
-    are unchanged. Positions past the end (r < 1) repeat the last frame, or, with
-    `pad` (D,) a silence latent, fade into it over `fade` input frames, as if the
-    hit died away just past the window (a hit still ringing at the end would
-    otherwise freeze into a drone)."""
+# ---- latent surgery: the latent is a sequence of frames in time, so a hit can
+# be re-timed by reading it at warped positions (src) instead of t.
+
+def warp(z, src, pad=None, fade=8):
+    """Read z (N, D, T) at fractional frame positions src (N, T), linearly
+    interpolating between frames. Positions before 0 read frame 0 (pre-onset).
+    Positions past the end repeat the last frame, or, with `pad` (D,) a silence
+    latent, fade into it over `fade` source frames, as if the hit died away just
+    past the window (a hit still ringing there would otherwise freeze into a drone)."""
     N, D, T = z.shape
-    t = torch.arange(T, dtype=torch.float32, device=z.device)[None, :].expand(N, T)
-    c = pivot.to(z.device)[:, None].float()
-    pos = torch.where(t > c, c + (t - c) / r, t)
-    src = pos.clamp(0, T - 1)
-    lo = src.floor().long()
+    s = src.to(z.device).clamp(0, T - 1)
+    lo = s.floor().long()
     hi = (lo + 1).clamp(max=T - 1)
-    w = (src - lo)[:, None, :]
+    w = (s - lo)[:, None, :]
     g = lambda ix: torch.gather(z, 2, ix[:, None, :].expand(N, D, T))
     out = g(lo) * (1 - w) + g(hi) * w
     if pad is not None:
-        a = ((pos - (T - 1)) / fade).clamp(0, 1)[:, None, :]        # 0 inside, -> 1 past the end
+        a = ((src.to(z.device) - (T - 1)) / fade).clamp(0, 1)[:, None, :]
         out = out * (1 - a) + pad.to(z)[None, :, None] * a
     return out
+
+
+def _frames(N, T, device=None):
+    return torch.arange(T, dtype=torch.float32, device=device)[None, :].expand(N, T)
+
+
+def stretch_tail(z, pivot, r, pad=None, fade=8):
+    """Resample the frames after `pivot` (N,) by factor r (> 1 = longer tail):
+    output frame t > pivot reads pivot + (t - pivot) / r; earlier frames are unchanged."""
+    t, c = _frames(z.shape[0], z.shape[2]), pivot[:, None].float().cpu()
+    return warp(z, torch.where(t > c, c + (t - c) / r, t), pad, fade)
+
+
+def hold_peak(z, peak, k, pad=None, fade=8):
+    """Punch: play the frame after the peak over 1 + k frames (k > 0 holds the loudest
+    part longer, k < 0 shortens it); everything after shifts by k frames."""
+    t, p = _frames(z.shape[0], z.shape[2]), peak[:, None].float().cpu()
+    k = max(float(k), -0.9)
+    src = torch.where(t <= p, t, torch.where(t <= p + 1 + k, p + (t - p) / (1 + k), t - k))
+    return warp(z, src, pad, fade)
+
+
+def hit_timing(y, T):
+    """Peak frame and last sounding frame per hit, (N,) each, from decoded audio y (N, L)."""
+    peak = frame_rms(y, T).argmax(1)
+    act = frame_activity(y, T)
+    end = (act * torch.arange(T)).argmax(1)               # last active frame
+    return peak, torch.maximum(end, peak + 1)
+
+
+def align_src(peak, end, p, L, T):
+    """Source positions that move a hit's peak to frame p and resample its tail
+    (peak -> end) to L frames: heads are shifted, tails stretched. All (N,)."""
+    t = _frames(len(peak), T)
+    peak, p = peak[:, None].float(), p[:, None].float()
+    scale = (end - peak.squeeze(1)).float()[:, None] / L[:, None]
+    return torch.where(t <= p, t - (p - peak), peak + (t - p) * scale)
+
+
+def ramp(t, centre, width):
+    """0 -> 1 linearly over `width` frames around `centre` (broadcast)."""
+    return ((t - centre) / max(width, 1e-3) + 0.5).clamp(0, 1)
+
+
+MORPH_MODES = ['blend', 'slerp', 'aligned', 'tail', 'crossover']
+
+
+def morph_aligned(za, zb, ta, tb, alpha, mode, width=4.0, pad=None):
+    """Shape-aware morphs of za, zb (D, T) with timings ta, tb = (peak, end) frames.
+      aligned    both hits re-timed to the in-between peak frame and tail length
+                 (tail lengths interpolate geometrically), then blended by alpha
+      tail       A's head kept; the tail re-timed to the in-between length and
+                 blended by alpha from just after A's peak (a ramp of `width` frames)
+      crossover  A turns into B at a time set by alpha: 0 = all A, 1 = all B, between
+                 = the hand-over (a `width`-frame ramp) moves linearly from the end of
+                 the hit (alpha near 0) to its start (near 1); both re-timed as in 'aligned'"""
+    D, T = za.shape
+    a = float(alpha)
+    if a <= 0 or (a >= 1 and mode != 'tail'):           # exact endpoints
+        return (za if a <= 0 else zb).clone()
+    (pa, ea), (pb, eb) = [tuple(torch.as_tensor(v).reshape(1) for v in tt) for tt in (ta, tb)]
+    La, Lb = (ea - pa).float(), (eb - pb).float()
+    L = torch.exp((1 - a) * La.log() + a * Lb.log())
+    p = pa.float() if mode == 'tail' else (1 - a) * pa.float() + a * pb.float()
+    Za = warp(za[None], align_src(pa, ea, p, L, T), pad)[0]
+    Zb = warp(zb[None], align_src(pb, eb, p, L, T), pad)[0]
+    t = torch.arange(T, dtype=torch.float32)
+    if mode == 'aligned':
+        c = torch.full((T,), a)
+    elif mode == 'tail':
+        c = a * ramp(t, p + 2, width)
+    elif mode == 'crossover':
+        # hand-over centre moves linearly from just past the end of the (re-timed)
+        # hit at 0 to just before frame 0 at 1
+        end = float(p + L)
+        tau = (1 - a) * (end + width / 2) - a * width / 2
+        c = ramp(t, tau, width) if 0 < a < 1 else torch.full((T,), a)
+    else:
+        raise ValueError(mode)
+    return Za * (1 - c) + Zb * c
 
 
 def silence_latent(z, y):
@@ -227,6 +307,30 @@ class DrumEngine:
             out = out + s * dirs[k]['vector'][:, None] * m[None, :]
         return out
 
+    # ---- time surgery (see warp / morph_aligned above) ---------------------
+    def _bank_timing(self):
+        """Once per bank: each hit's (peak, end) frames and the silence latent."""
+        if getattr(self, '_timing', None) is None:
+            Z = self.bank['latents']
+            y = torch.from_numpy(self.decode(Z)).float()
+            self._timing = hit_timing(y, Z.shape[-1])
+            self.z_silence = silence_latent(Z, y)
+        return self._timing
+
+    def _peak(self, z):
+        y = torch.from_numpy(self.decode(z)).float().unsqueeze(0)
+        return frame_rms(y, z.shape[-1]).argmax(1)
+
+    def morph(self, a_idx, b_idx, t, mode='blend', width=4.0):
+        """Bank hits a -> b by amount t. blend / slerp: frame by frame as stored;
+        aligned / tail / crossover: re-timed first (morph_aligned)."""
+        za, zb = self.z(a_idx), self.z(b_idx)
+        if mode in ('blend', 'slerp'):
+            return (self.slerp if mode == 'slerp' else self.lerp)(za, zb, torch.tensor(float(t)))
+        peak, end = self._bank_timing()
+        return morph_aligned(za, zb, (peak[a_idx], end[a_idx]), (peak[b_idx], end[b_idx]),
+                             t, mode, width, pad=self.z_silence)
+
     def stretch(self, z, factor, head=2):
         """Decay control with no learned direction: keep z (D, T_lat) up to `head`
         frames past the hit's loudest frame, and resample the frames after it by
@@ -234,12 +338,16 @@ class DrumEngine:
         silence latent past the window end. Costs one extra decode to find the peak."""
         if factor == 1:
             return z
-        if getattr(self, 'z_silence', None) is None:      # once: from the bank's silent frames
-            Z = self.bank['latents']
-            self.z_silence = silence_latent(Z, torch.from_numpy(self.decode(Z)).float())
-        y = torch.from_numpy(self.decode(z)).float().unsqueeze(0)
-        pivot = frame_rms(y, z.shape[-1]).argmax(1) + head
-        return stretch_tail(z.unsqueeze(0), pivot, factor, pad=self.z_silence)[0]
+        self._bank_timing()
+        return stretch_tail(z[None], self._peak(z) + head, factor, pad=self.z_silence)[0]
+
+    def punch(self, z, frames):
+        """Hold the loudest part of the hit `frames` latent frames longer (11.6 ms each
+        at 44.1 kHz; < 0 shortens it); the rest of the hit follows later."""
+        if frames == 0:
+            return z
+        self._bank_timing()
+        return hold_peak(z[None], self._peak(z), frames, pad=self.z_silence)[0]
 
     # ---- decode / render --------------------------------------------------
     def decode(self, z):

@@ -5,7 +5,9 @@ training split.
 
 Modes:
     interp   VAE: lerp between the latents of two training hits of the same
-             type, at t ~ U(0.25, 0.75) so neither endpoint dominates
+             type, at t ~ U(0.25, 0.75) so neither endpoint dominates;
+             --interp_mode aligned / tail / crossover re-times the two first
+             (drum_engine.morph_aligned; same pairs and t for every mode)
     perturb  VAE: one training hit's latent + N(0, sigma) noise on the frames
              where the hit sounds (silent frames left alone, as for the knobs)
     real     no model: the training hits themselves (the "sample library"
@@ -35,7 +37,7 @@ import soundfile as sf
 import torch
 
 from drum_types import classify
-from drum_engine import frame_activity
+from drum_engine import frame_activity, hit_timing, morph_aligned, silence_latent
 from eval_pipeline import load_checkpoint, read_split, make_dataset
 
 
@@ -77,6 +79,15 @@ def main(args):
         pre = dict(onset_thresh=dl.get('onset_thresh', 0.02), pre_pad=dl.get('pre_pad', 256),
                    peak_norm=dl.get('peak_norm', True))
         lat = []
+        z_sil = None
+        if args.mode == 'interp' and args.interp_mode != 'blend':
+            # silence latent for re-timed tails that run past the window: from the
+            # first 64 training hits (fixed, so the rng draws match every mode)
+            ds = make_dataset(args.data_dir, train[:64], sr, chunk, **pre)
+            with torch.no_grad():
+                mu = torch.cat([model.encode(torch.stack([ds[k][2] for k in range(s, min(s + 16, 64))])
+                                             .to(device))[0] for s in range(0, 64, 16)])
+                z_sil = silence_latent(mu.cpu(), model.decode(mu).squeeze(1).cpu())
         for t in sorted(counts):
             for i in range(counts[t]):
                 srcs = rng.sample(by_type[t], 2 if args.mode == 'interp' else 1)
@@ -86,7 +97,13 @@ def main(args):
                     mu = model.encode(x)[0]
                     if args.mode == 'interp':
                         a = rng.uniform(0.25, 0.75)
-                        z = (1 - a) * mu[0:1] + a * mu[1:2]
+                        if args.interp_mode == 'blend':
+                            z = (1 - a) * mu[0:1] + a * mu[1:2]
+                        else:
+                            pk, en = hit_timing(model.decode(mu).squeeze(1).cpu(), mu.shape[-1])
+                            m = mu.cpu()
+                            z = morph_aligned(m[0], m[1], (pk[0], en[0]), (pk[1], en[1]), a,
+                                              args.interp_mode, pad=z_sil)[None].to(device)
                         info = f'{srcs[0]} | {srcs[1]} | t={a:.3f}'
                     else:
                         y0 = model.decode(mu).squeeze(1).cpu()
@@ -100,7 +117,7 @@ def main(args):
                 sf.write(os.path.join(args.out_dir, name), y, sr, subtype='FLOAT')
                 rows.append({'file': name, 'type': t, 'sources': info})
         timing = {'checkpoint': args.resume, 'epoch': epoch, 'device': args.device,
-                  'mode': args.mode, 'n': len(rows), 'sample_rate': sr,
+                  'mode': args.mode, 'interp_mode': args.interp_mode, 'n': len(rows), 'sample_rate': sr,
                   'chunk_s': chunk / sr, 'decode_sec_per_hit_median': float(np.median(lat[3:]))}
         with open(os.path.join(args.out_dir, 'timing.json'), 'w') as f:
             json.dump(timing, f, indent=1)
@@ -122,6 +139,7 @@ if __name__ == '__main__':
     p.add_argument('--train_split', default='splits/train.txt', help='source hits')
     p.add_argument('-o', '--out_dir', required=True)
     p.add_argument('--sigma', type=float, default=0.5)
+    p.add_argument('--interp_mode', default='blend', choices=['blend', 'aligned', 'tail', 'crossover'])
     p.add_argument('-d', '--device', default='cpu')
     p.add_argument('--seed', type=int, default=0)
     args = p.parse_args()

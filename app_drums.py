@@ -13,8 +13,10 @@ Run:
     python app_drums.py -b <bank.pt> -r <checkpoint.pth> [--device cpu|mps|cuda] [--share]
     python app_drums.py --directions sweeps/prototype/directions.pt   # + knob sliders
 
-Decay (stretch) needs no directions: the latent after the hit's peak is resampled
-in time (DrumEngine.stretch); the slider is log2 of the tail-length factor.
+Time surgery (no directions needed; the latent is a sequence of frames in time):
+Decay resamples the latent after the hit's peak (log2 of the tail-length factor),
+Punch holds the peak frame longer, and the morph modes re-time the two hits before
+blending them: shape-aligned, tail only, or a crossover from A into B (drum_engine).
 
 Knob sliders (Tone, Snappy, ...) appear only with --directions: latent
 directions fit and calibrated by control_sweeps.py, applied after morph and
@@ -38,6 +40,10 @@ import gradio as gr
 import soundfile as sf
 
 from drum_engine import DrumEngine
+
+# morph-mode dropdown label -> DrumEngine.morph mode
+MODES = {'Blend': 'blend', 'Blend (slerp)': 'slerp', 'Shape-aligned': 'aligned',
+         'Tail only': 'tail', 'Crossover in time': 'crossover'}
 
 
 def _logspec(w, n_fft=1024, hop=256):
@@ -64,24 +70,24 @@ def build_app(engine):
     dir_keys = knob_keys + explore_keys
     dirs = {**(getattr(engine, 'knobs', {}) or {}), **(getattr(engine, 'explore', {}) or {})}
 
-    def render(a_idx, b_idx, morph, use_slerp, sigma, seed, decay, *knob_vals):
-        za, zb = engine.z(int(a_idx)), engine.z(int(b_idx))
-        fn = engine.slerp if use_slerp else engine.lerp
-        z = fn(za, zb, torch.tensor(float(morph)))
+    def render(a_idx, b_idx, morph, mode, width, sigma, seed, decay, punch, *knob_vals):
+        z = engine.morph(int(a_idx), int(b_idx), float(morph), MODES[mode], float(width))
         if sigma > 0:
             g = torch.Generator().manual_seed(int(seed))
             z = engine.perturb(z, float(sigma), g)
         z = engine.steer(z, dict(zip(dir_keys, knob_vals))) if dir_keys else z
-        z = engine.stretch(z, 2.0 ** float(decay))          # last: a time operation on the result
+        z = engine.punch(z, float(punch))                   # last: time operations on the result
+        z = engine.stretch(z, 2.0 ** float(decay))
         w = engine.render(z).astype(np.float32)
         turned = '  ' + ' '.join(f'{dirs[k]["analogue"]}{v:+.1f}'
                                  for k, v in zip(dir_keys, knob_vals) if v) if dir_keys else ''
         turned += f'  decay x{2.0 ** float(decay):.2f}' if decay else ''
+        turned += f'  punch {punch:+.2f}' if punch else ''
 
         fig, ax = plt.subplots(2, 1, figsize=(7, 4), gridspec_kw={'height_ratios': [1, 2]})
         ax[0].plot(np.arange(len(w)) / engine.sr, w, lw=0.5, color='seagreen')
         ax[0].set_xlim(0, len(w) / engine.sr); ax[0].set_title(
-            f'[{types[int(a_idx)]}] →({morph:.2f})→ [{types[int(b_idx)]}]'
+            f'[{types[int(a_idx)]}] →({morph:.2f} {MODES[mode]})→ [{types[int(b_idx)]}]'
             f'{"  +noise" if sigma > 0 else ""}{turned}', fontsize=9)
         ax[0].set_ylim(-1.05, 1.05); ax[0].tick_params(labelsize=6)
         ax[1].imshow(_logspec(w), aspect='auto', origin='lower', cmap='magma')
@@ -104,12 +110,23 @@ def build_app(engine):
         orig_player = gr.HTML('', padding=False)
         morph = gr.Slider(0, 1, value=0.0, step=0.01, label='Morph  A → B   (velocity axis)')
         with gr.Row():
+            mode = gr.Dropdown(list(MODES), value='Blend', label='Morph mode',
+                               info='Blend: frame by frame as stored. Shape-aligned: peaks and '
+                                    'tail lengths matched first. Tail only: A\'s attack, tail '
+                                    'morphed. Crossover: A turns into B, the morph sets when.')
+            width = gr.Slider(1, 16, value=4, step=1, label='Crossfade width (frames)',
+                              info='Tail only / crossover: how gradual the hand-over is '
+                                   '(1 frame = 11.6 ms)')
+        with gr.Row():
             sigma = gr.Slider(0, 1.2, value=0.0, step=0.01, label='Perturbation σ (variation)')
-            use_slerp = gr.Checkbox(value=False, label='Spherical (slerp)')
             seed = gr.Number(value=0, precision=0, label='Variation seed')
-        decay = gr.Slider(-2, 2, value=0.0, step=0.1, label='Decay (stretch): tail length x 2^s',
-                          info='no learned direction: the latent after the peak is resampled in '
-                               'time; -2 = x0.25, +2 = x4 (long hits stop at the 1.5 s window)')
+        with gr.Row():
+            decay = gr.Slider(-2, 2, value=0.0, step=0.1, label='Decay (stretch): tail length x 2^s',
+                              info='the latent after the peak is resampled in time; -2 = x0.25, '
+                                   '+2 = x4 (long hits stop at the 1.5 s window)')
+            punch = gr.Slider(-0.75, 4, value=0.0, step=0.25, label='Punch: hold the peak (frames)',
+                              info='the loudest frame is held this many frames longer '
+                                   '(11.6 ms each); < 0 shortens it')
         knob_sliders = []
         if knob_keys:
             gr.Markdown('**Knobs** — latent directions from the control sweeps '
@@ -149,11 +166,12 @@ def build_app(engine):
                                     info=engine.explore[k]['info']))
                 reset = gr.Button('Reset explore sliders', size='sm', variant='secondary')
 
-        inputs = [a, b, morph, use_slerp, sigma, seed, decay] + knob_sliders + explore_sliders
+        inputs = [a, b, morph, mode, width, sigma, seed, decay, punch] + knob_sliders + explore_sliders
         gen.click(render, inputs, [audio, plot])
         # live re-render when the sliders settle
-        for sl in [morph, sigma, decay] + knob_sliders + explore_sliders:
+        for sl in [morph, width, sigma, decay, punch] + knob_sliders + explore_sliders:
             sl.release(render, inputs, [audio, plot])
+        mode.change(render, inputs, [audio, plot])
         if explore_sliders:
             reset.click(lambda: [0.0] * len(explore_sliders), None, explore_sliders).then(
                 render, inputs, [audio, plot])
