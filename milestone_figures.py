@@ -27,8 +27,10 @@ MODELS = {   # label: (checkpoint, sweep directions, Tone knob key)
     'Prototype (22k)': ('saved/models/DrumOneShots/checkpoint-epoch1500.pth',
                         'sweeps/prototype/directions.pt', 'active/brightness/pca'),
     '22k': (f'{RUNS}/Drums_22k/1027_154437/checkpoint-epoch1500.pth', None, None),
-    '44k': (f'{RUNS}/Drums_44k/1027_125950/checkpoint-epoch1500.pth',
-            'sweeps/44k_ep1500/directions.pt', 'active/brightness/kl'),
+    '44k, β=0.02': (f'{RUNS}/Drums_44k/1027_125950/checkpoint-epoch1500.pth',
+                    'sweeps/44k_ep1500/directions.pt', 'active/brightness/kl'),
+    '44k, β=0.005': (f'{RUNS}/Drums_44k_b005/1107_233934/checkpoint-epoch1500.pth',
+                     'sweeps/44k_b005_ep1500/directions.pt', 'active/brightness/pca'),
 }
 
 
@@ -73,15 +75,15 @@ def main(args):
     ax_kl.set_title('(a) latent usage, test split', fontsize=9)
     ax_kl.legend(fontsize=7)
     ax_k.plot(grid, grid, 'k:', lw=0.8, label='target')
-    ax_k.set_xlabel('Tone knob $s$ (descriptor std)')
+    ax_k.set_xlabel('Tone control $s$ (descriptor std)')
     ax_k.set_ylabel('$\\Delta$ brightness (std)')
-    ax_k.set_title(f'(b) Tone knob, {args.n_knob} test hits', fontsize=9)
-    ax_k.legend(fontsize=7)
+    ax_k.set_title(f'(b) Tone control, {args.n_knob} test hits', fontsize=9)
+    ax_k.legend(fontsize=6, loc='upper left')
     for ax in (ax_kl, ax_k):
         ax.tick_params(labelsize=7)
     fig.tight_layout()
     os.makedirs(os.path.dirname(args.out) or '.', exist_ok=True)
-    fig.savefig(args.out)
+    fig.savefig(args.out, bbox_inches='tight', pad_inches=0.03)
     print('saved', args.out)
 
 

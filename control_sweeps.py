@@ -34,9 +34,18 @@ frames within 40 dB of the loudest one.
    is sounding ('active': frames of the recon within 50 dB of its loudest,
    dilated by 2); pooling for the fit matches.
 
+3. Unlabelled directions (--pc_dirs K): the top K principal axes of the
+   pooled latent ('fit': from the fit set; 'bank': from a --bank's latents,
+   exactly as the app's explore sliders compute them), each one PC std long,
+   swept the same way. No descriptor is targeted, so each is labelled by the
+   descriptor it moves most and signed so that descriptor rises; slope is
+   then in descriptor std per PC std. --only_pcs adds these to an earlier
+   run's outputs instead of redoing the descriptor knobs.
+
 Outputs under <out_dir>/ (default sweeps/<name>):
     summary.txt, summary.json   the table above, per mode x knob x direction
     sweeps_<mode>.png           mean descriptor change vs s
+    sweeps_pcs.png              the same for the unlabelled PC directions
     directions.pt               knob vectors + calibration + safe ranges (app)
     audio/<kind>/<hit>_<knob>.wav  one hit swept from -max to +max s, with gaps
                                    ('active' mode only)
@@ -166,6 +175,14 @@ def fit_directions(X, Y, pcs, active):
     return out
 
 
+def pc_directions(X, k):
+    """Top-k principal axes of pooled latents X (N, D): unit vectors (k, D),
+    the std along each, and each one's share of the variance."""
+    X = np.asarray(X, dtype=np.float64)
+    _, S, Vt = np.linalg.svd(X - X.mean(0), full_matrices=False)
+    return Vt[:k], S[:k] / np.sqrt(max(len(X) - 1, 1)), (S ** 2 / (S ** 2).sum())[:k]
+
+
 def sweep_metrics(D, grid, j):
     """D (S, N, K) standardised descriptors over the s grid for knob index j."""
     grid = np.asarray(grid, dtype=float)
@@ -234,7 +251,12 @@ def main(args):
     i0 = grid.index(0.0)
 
     summary, directions = {}, {}
-    for mode in args.modes:
+    if args.only_pcs:                        # add to an earlier run's outputs
+        with open(os.path.join(out_dir, 'summary.json')) as f:
+            summary = json.load(f)
+        directions = torch.load(os.path.join(out_dir, 'directions.pt'),
+                                weights_only=False)['directions']
+    for mode in ([] if args.only_pcs else args.modes):
         m_fit = frame_activity(y_fit, T) if mode == 'active' else torch.ones(len(mu_fit), T)
         m_t = frame_activity(y_t, T) if mode == 'active' else torch.ones(len(mu_t), T)
         dirs = fit_directions(pool(mu_fit, m_fit)[keep].numpy(), Y[keep], args.pcs, active)
@@ -279,12 +301,16 @@ def main(args):
         fig.savefig(os.path.join(out_dir, f'sweeps_{mode}.png'), dpi=110)
         plt.close(fig)
 
+    if args.pc_dirs:
+        sweep_pcs(args, model, device, grid, i0, mean, std, sr, T, keep, mu_fit, y_fit, mu_t, y_t,
+                  test_rel, test_ds, out_dir, summary, directions)
+
     lines = [f'{"mode/knob/direction":<30}{"cv_R2":>7}{"slope":>7}{"r2":>6}{"monot":>7}'
              f'{"leak":>6}  safe_range']
     for key, m in summary.items():
         lines.append(f'{key:<30}{m["r2_cv"]:>7.2f}{m["slope"]:>7.2f}{m["r2"]:>6.2f}'
                      f'{m["monotone"]:>7.0%}{m["leakage"]:>6.2f}  [{m["safe_range"][0]:+.0f}, '
-                     f'{m["safe_range"][1]:+.0f}]')
+                     f'{m["safe_range"][1]:+.0f}]' + (f'  -> {m["target"]}' if 'target' in m else ''))
     text = '\n'.join(lines)
     print('\n' + text)
     with open(os.path.join(out_dir, 'summary.txt'), 'w') as f:
@@ -295,6 +321,70 @@ def main(args):
                 'directions': directions, 'sr': sr, 'chunk_size': chunk},
                os.path.join(out_dir, 'directions.pt'))
     print(f'Saved  {out_dir}/directions.pt, summary.txt, sweeps_*.png')
+
+
+def sweep_pcs(args, model, device, grid, i0, mean, std, sr, T, keep, mu_fit, y_fit, mu_t, y_t,
+              test_rel, test_ds, out_dir, summary, directions):
+    """Sweep the top --pc_dirs principal axes (fit set, and --bank if given) on
+    the sweep hits; adds 'active/pc<k>/<source>' entries (see docstring 3)."""
+    m_fit, m_t = frame_activity(y_fit, T), frame_activity(y_t, T)
+    D0 = (desc_array(y_t.numpy(), sr) - mean) / std
+    sources = {'fit': pc_directions(pool(mu_fit, m_fit)[keep].numpy(), args.pc_dirs)}
+    if args.bank:
+        Zb = torch.load(args.bank, map_location='cpu', weights_only=False)['latents']
+        mb = frame_activity(decode(model, Zb, device), T)
+        sources['bank'] = pc_directions(pool(Zb, mb).numpy(), args.pc_dirs)
+        cos = np.abs(sources['bank'][0] @ sources['fit'][0].T)
+        print('|cos| bank PCs (rows) vs fit PCs (cols):')
+        for k, row in enumerate(cos):
+            print(f'  bank PC{k + 1}: ' + ' '.join(f'{c:.2f}' for c in row))
+    symmetric = np.allclose(grid, -np.asarray(grid[::-1]))
+
+    def sweep(v):
+        Ds = []
+        for s in grid:
+            if s == 0.0:
+                Ds.append(D0); continue
+            z = mu_t + s * v[None, :, None] * m_t[:, None, :]
+            Ds.append((desc_array(decode(model, z, device).numpy(), sr) - mean) / std)
+        return np.stack(Ds)
+
+    fig, axes = plt.subplots(len(sources), args.pc_dirs, figsize=(3.2 * args.pc_dirs, 3.2 * len(sources)),
+                             sharey=True, squeeze=False)
+    for r, (src, (U, sd, var)) in enumerate(sources.items()):
+        for k in range(len(sd)):
+            v = torch.tensor(U[k] * sd[k], dtype=torch.float32)
+            Ds = sweep(v)
+            slopes = sweep_metrics(Ds, grid, 0)['leak_slopes']
+            j = int(np.argmax(np.abs(slopes)))
+            if slopes[j] < 0:                     # sign it so its main descriptor rises
+                v = -v
+                Ds = Ds[::-1].copy() if symmetric else sweep(v)
+            met = sweep_metrics(Ds, grid, j)
+            key = f'active/pc{k + 1}/{src}'
+            label = f'PC{k + 1}: {ANALOGUE[KNOBS[j]]}'
+            summary[key] = {**met, 'r2_cv': float('nan'), 'single_dim': -1,
+                            'target': KNOBS[j], 'var': float(var[k])}
+            directions[key] = {'vector': v, 'mean': float(mean[j]), 'std': float(std[j]), **met,
+                               'r2_cv': float('nan'), 'analogue': label, 'target': KNOBS[j]}
+            ax = axes[r, k]
+            dD = Ds - Ds[i0]
+            for q, kk in enumerate(KNOBS):
+                ax.plot(grid, np.nanmean(dD[:, :, q], 1), lw=2.5 if q == j else 1,
+                        alpha=1 if q == j else 0.6, label=kk)
+            ax.axhline(0, color='k', lw=0.5)
+            ax.set_title(f'{src} {label} ({var[k]:.0%} var)', fontsize=9)
+            ax.set_xlabel('s (PC std)')
+            if k == 0: ax.set_ylabel(f'{src}: mean change (std units)')
+            if r == 0 and k == 0: ax.legend(fontsize=7)
+            if args.n_audio:
+                write_strips(model, mu_t, m_t, v, grid, test_rel, test_ds,
+                             os.path.join(out_dir, 'audio', 'pcs'), f'pc{k + 1}{src}', sr, device,
+                             args.n_audio)
+    fig.suptitle(f'{args.name}: unlabelled PC directions (offset on active frames)', fontsize=10)
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, 'sweeps_pcs.png'), dpi=110)
+    plt.close(fig)
 
 
 def write_strips(model, mu, mask, v, grid, rel, ds, out_dir, knob, sr, device, n):
@@ -339,6 +429,11 @@ if __name__ == '__main__':
     p.add_argument('--kl_thresh', type=float, default=0.2,
                    help="nats; 'kl' directions use only dims with mean KL above this")
     p.add_argument('--n_audio', type=int, default=7, help='hits per knob to write as sweep strips')
+    p.add_argument('--pc_dirs', type=int, default=0,
+                   help='also sweep the top K principal axes of the pooled latent (docstring 3)')
+    p.add_argument('--bank', help='also sweep the PCs of this bank (as the app explore sliders)')
+    p.add_argument('--only_pcs', action='store_true',
+                   help="skip the descriptor knobs; add the PC sweeps to out_dir's existing outputs")
     p.add_argument('-d', '--device')
     p.add_argument('--seed', type=int, default=0)
     args = p.parse_args()
