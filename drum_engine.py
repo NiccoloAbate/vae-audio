@@ -9,6 +9,7 @@ transient event, so the interesting controls live in latent space:
     decode      z (D, T_lat)            -> waveform
     lerp/slerp  (z_a, z_b, t)           -> morph between two hits
     perturb     (z, sigma)              -> a variation of a hit
+    stretch     (z, factor)             -> same hit, tail resampled in time (decay)
     render      z -> trimmed, normalised one-shot ready to trigger
 
 `velocity`-style automation is just interpolation with t driven by a control
@@ -43,6 +44,43 @@ def frame_activity(y, T, thresh_db=-50.0, dilate=2):
     if dilate:
         m = torch.nn.functional.max_pool1d(m.unsqueeze(1), 2 * dilate + 1, 1, dilate).squeeze(1)
     return m
+
+
+def frame_rms(y, T):
+    """(N, L) audio -> (N, T) RMS per latent frame."""
+    N, L = y.shape
+    hop = L // T
+    return y[:, :hop * T].reshape(N, T, hop).pow(2).mean(2).sqrt()
+
+
+def stretch_tail(z, pivot, r, pad=None, fade=8):
+    """Resample the latent frames after `pivot` by factor r (> 1 = longer tail):
+    output frame t > pivot reads input position pivot + (t - pivot) / r, linearly
+    interpolated. z (N, D, T), pivot (N,) frame indices; frames up to the pivot
+    are unchanged. Positions past the end (r < 1) repeat the last frame, or, with
+    `pad` (D,) a silence latent, fade into it over `fade` input frames, as if the
+    hit died away just past the window (a hit still ringing at the end would
+    otherwise freeze into a drone)."""
+    N, D, T = z.shape
+    t = torch.arange(T, dtype=torch.float32, device=z.device)[None, :].expand(N, T)
+    c = pivot.to(z.device)[:, None].float()
+    pos = torch.where(t > c, c + (t - c) / r, t)
+    src = pos.clamp(0, T - 1)
+    lo = src.floor().long()
+    hi = (lo + 1).clamp(max=T - 1)
+    w = (src - lo)[:, None, :]
+    g = lambda ix: torch.gather(z, 2, ix[:, None, :].expand(N, D, T))
+    out = g(lo) * (1 - w) + g(hi) * w
+    if pad is not None:
+        a = ((pos - (T - 1)) / fade).clamp(0, 1)[:, None, :]        # 0 inside, -> 1 past the end
+        out = out * (1 - a) + pad.to(z)[None, :, None] * a
+    return out
+
+
+def silence_latent(z, y):
+    """Mean latent frame where decoded hits are silent: z (N, D, T), y (N, L) -> (D,)."""
+    quiet = frame_activity(y, z.shape[-1]) == 0                         # (N, T)
+    return z.permute(0, 2, 1)[quiet].mean(0)
 
 
 class DrumEngine:
@@ -188,6 +226,20 @@ class DrumEngine:
             m = mask if k.startswith('active/') else torch.ones_like(mask)
             out = out + s * dirs[k]['vector'][:, None] * m[None, :]
         return out
+
+    def stretch(self, z, factor, head=2):
+        """Decay control with no learned direction: keep z (D, T_lat) up to `head`
+        frames past the hit's loudest frame, and resample the frames after it by
+        `factor` (2 = tail twice as long); a compressed tail fades into the bank's
+        silence latent past the window end. Costs one extra decode to find the peak."""
+        if factor == 1:
+            return z
+        if getattr(self, 'z_silence', None) is None:      # once: from the bank's silent frames
+            Z = self.bank['latents']
+            self.z_silence = silence_latent(Z, torch.from_numpy(self.decode(Z)).float())
+        y = torch.from_numpy(self.decode(z)).float().unsqueeze(0)
+        pivot = frame_rms(y, z.shape[-1]).argmax(1) + head
+        return stretch_tail(z.unsqueeze(0), pivot, factor, pad=self.z_silence)[0]
 
     # ---- decode / render --------------------------------------------------
     def decode(self, z):

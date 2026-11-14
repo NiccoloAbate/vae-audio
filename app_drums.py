@@ -13,6 +13,9 @@ Run:
     python app_drums.py -b <bank.pt> -r <checkpoint.pth> [--device cpu|mps|cuda] [--share]
     python app_drums.py --directions sweeps/prototype/directions.pt   # + knob sliders
 
+Decay (stretch) needs no directions: the latent after the hit's peak is resampled
+in time (DrumEngine.stretch); the slider is log2 of the tail-length factor.
+
 Knob sliders (Tone, Snappy, ...) appear only with --directions: latent
 directions fit and calibrated by control_sweeps.py, applied after morph and
 perturbation. Slider units are the sweep's s (one = the change the direction
@@ -61,7 +64,7 @@ def build_app(engine):
     dir_keys = knob_keys + explore_keys
     dirs = {**(getattr(engine, 'knobs', {}) or {}), **(getattr(engine, 'explore', {}) or {})}
 
-    def render(a_idx, b_idx, morph, use_slerp, sigma, seed, *knob_vals):
+    def render(a_idx, b_idx, morph, use_slerp, sigma, seed, decay, *knob_vals):
         za, zb = engine.z(int(a_idx)), engine.z(int(b_idx))
         fn = engine.slerp if use_slerp else engine.lerp
         z = fn(za, zb, torch.tensor(float(morph)))
@@ -69,9 +72,11 @@ def build_app(engine):
             g = torch.Generator().manual_seed(int(seed))
             z = engine.perturb(z, float(sigma), g)
         z = engine.steer(z, dict(zip(dir_keys, knob_vals))) if dir_keys else z
+        z = engine.stretch(z, 2.0 ** float(decay))          # last: a time operation on the result
         w = engine.render(z).astype(np.float32)
         turned = '  ' + ' '.join(f'{dirs[k]["analogue"]}{v:+.1f}'
                                  for k, v in zip(dir_keys, knob_vals) if v) if dir_keys else ''
+        turned += f'  decay x{2.0 ** float(decay):.2f}' if decay else ''
 
         fig, ax = plt.subplots(2, 1, figsize=(7, 4), gridspec_kw={'height_ratios': [1, 2]})
         ax[0].plot(np.arange(len(w)) / engine.sr, w, lw=0.5, color='seagreen')
@@ -102,6 +107,9 @@ def build_app(engine):
             sigma = gr.Slider(0, 1.2, value=0.0, step=0.01, label='Perturbation σ (variation)')
             use_slerp = gr.Checkbox(value=False, label='Spherical (slerp)')
             seed = gr.Number(value=0, precision=0, label='Variation seed')
+        decay = gr.Slider(-2, 2, value=0.0, step=0.1, label='Decay (stretch): tail length x 2^s',
+                          info='no learned direction: the latent after the peak is resampled in '
+                               'time; -2 = x0.25, +2 = x4 (long hits stop at the 1.5 s window)')
         knob_sliders = []
         if knob_keys:
             gr.Markdown('**Knobs** — latent directions from the control sweeps '
@@ -141,10 +149,10 @@ def build_app(engine):
                                     info=engine.explore[k]['info']))
                 reset = gr.Button('Reset explore sliders', size='sm', variant='secondary')
 
-        inputs = [a, b, morph, use_slerp, sigma, seed] + knob_sliders + explore_sliders
+        inputs = [a, b, morph, use_slerp, sigma, seed, decay] + knob_sliders + explore_sliders
         gen.click(render, inputs, [audio, plot])
         # live re-render when the sliders settle
-        for sl in [morph, sigma] + knob_sliders + explore_sliders:
+        for sl in [morph, sigma, decay] + knob_sliders + explore_sliders:
             sl.release(render, inputs, [audio, plot])
         if explore_sliders:
             reset.click(lambda: [0.0] * len(explore_sliders), None, explore_sliders).then(
