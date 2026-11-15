@@ -264,11 +264,21 @@ class OneShotAudioDataset(Dataset):
                          e.g. ['kick', 'snare', 'clap', 'hat', 'cymbal', 'tom', 'perc'].
                          'exclude' files are always dropped when types is set.
         packs:           keep only files under these top-level folders.
+        exclude:         a text file of paths (relative to the dataset dir) to leave
+                         out, e.g. splits/exclude_train.txt from dedupe_splits.py.
+        augment:        None, or a dict of artifact-free augmentations (the hit is
+                         also the discriminator's "real", so no smearing methods):
+                           p_pitch, semitones: with prob p_pitch, repitch by
+                             U(-semitones, semitones) by resampling (tape speed:
+                             pitch and length change together);
+                           p_decay, decay_start, decay_tau: with prob p_decay,
+                             choke the hit with exp(-(t - t0)/tau) after t0 seconds
+                             past the onset, t0 ~ U(decay_start), tau ~ U(decay_tau).
     """
     def __init__(self, path_to_dataset, sr=22050, chunk_size=110080,
                  onset_thresh=0.02, pre_pad=256, peak_norm=True,
                  extensions=('.wav', '.flac', '.aif', '.aiff'),
-                 split=None, types=None, packs=None, **kwargs):
+                 split=None, types=None, packs=None, exclude=None, augment=None, **kwargs):
         if isinstance(path_to_dataset, str):
             path_to_dataset = [path_to_dataset]
 
@@ -282,24 +292,35 @@ class OneShotAudioDataset(Dataset):
         if len(files) == 0:
             raise RuntimeError(f"No audio files found under {path_to_dataset}")
 
-        if split is not None or types is not None or packs is not None:
-            assert len(path_to_dataset) == 1, "split/types/packs need a single dataset dir"
+        self.drum_types = None
+        if split is not None or types is not None or packs is not None or exclude is not None:
+            assert len(path_to_dataset) == 1, "split/types/packs/exclude need a single dataset dir"
             root = path_to_dataset[0]
             from drum_types import classify
-            kept = []
+            skip = set()
+            if exclude is not None:
+                with open(exclude) as fh:
+                    skip = {l.strip() for l in fh if l.strip()}
+            kept, kept_types = [], []
             for f in files:
                 rel = os.path.relpath(f, root).replace(os.sep, '/')
                 if split is not None and oneshot_split(rel) != split:
                     continue
+                if rel in skip:
+                    continue
                 if packs is not None and rel.split('/')[0] not in packs:
                     continue
-                if types is not None and classify(f, root=root) not in types:
+                t = classify(f, root=root) if types is not None else None
+                if types is not None and t not in types:
                     continue
                 kept.append(f)
+                kept_types.append(t)
             files = kept
+            self.drum_types = kept_types        # per file, when `types` filters
             if len(files) == 0:
                 raise RuntimeError(f"No files left after split={split} types={types} packs={packs}")
-            print(f"OneShotAudioDataset: {len(files)} files (split={split}, types={types}, packs={packs})")
+            print(f"OneShotAudioDataset: {len(files)} files (split={split}, types={types}, packs={packs}"
+                  + (f", {len(skip)} excluded by {exclude})" if exclude else ")"))
 
         self.files        = files
         self.sr           = sr
@@ -307,6 +328,7 @@ class OneShotAudioDataset(Dataset):
         self.onset_thresh = onset_thresh
         self.pre_pad      = pre_pad
         self.peak_norm    = peak_norm
+        self.augment      = augment
         # label = immediate parent dir name (keeps per-class structure if present)
         self.labels       = [os.path.basename(os.path.dirname(f)) for f in files]
         self.path_to_data = files
@@ -329,6 +351,26 @@ class OneShotAudioDataset(Dataset):
         start = max(0, onset - self.pre_pad)
         return y[start:]
 
+    def _repitch(self, y, semitones):
+        """Tape-speed repitch: play back 2^(s/12) times faster, by bandlimited
+        resampling. Rates are quantized to 1/10 semitone (resampling kernels
+        stay small and torchaudio caches them)."""
+        s = round(float(semitones) * 10) / 10
+        if s == 0:
+            return y
+        orig = int(round(1000 * 2 ** (s / 12)))
+        return torchaudio.functional.resample(y.unsqueeze(0), orig, 1000).squeeze(0)
+
+    def _choke(self, y, start, tau):
+        """Exponential fade from t0 past the onset (after attack alignment)."""
+        u = lambda r: r[0] + (r[1] - r[0]) * float(torch.rand(()))
+        t0 = self.pre_pad + int(u(start) * self.sr)
+        if t0 >= y.shape[0]:
+            return y
+        t = torch.arange(y.shape[0] - t0, dtype=y.dtype) / self.sr
+        env = torch.cat([torch.ones(t0, dtype=y.dtype), torch.exp(-t / u(tau))])
+        return y * env
+
     def __getitem__(self, idx):
         path = self.files[idx]
         y, file_sr = torchaudio.load(path)             # (C, T)
@@ -338,7 +380,14 @@ class OneShotAudioDataset(Dataset):
             y = torchaudio.functional.resample(y, file_sr, self.sr)
         y = y.squeeze(0)                               # (T,)
 
+        a = self.augment or {}
+        if a.get('p_pitch', 0) > 0 and torch.rand(()) < a['p_pitch']:
+            y = self._repitch(y, (2 * torch.rand(()) - 1) * a.get('semitones', 2.0))
+
         y = self._align_attack(y)
+
+        if a.get('p_decay', 0) > 0 and torch.rand(()) < a['p_decay']:
+            y = self._choke(y, a.get('decay_start', (0.05, 0.4)), a.get('decay_tau', (0.02, 0.15)))
 
         if y.shape[0] < self.chunk_size:
             y = F.pad(y, (0, self.chunk_size - y.shape[0]))

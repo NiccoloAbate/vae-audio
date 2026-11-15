@@ -1,6 +1,7 @@
 import numpy as np
+import torch
 from torch.utils.data import DataLoader, Dataset
-from torch.utils.data.sampler import SubsetRandomSampler
+from torch.utils.data.sampler import SubsetRandomSampler, WeightedRandomSampler
 from torchvision import datasets, transforms
 from base import BaseDataLoader
 from dataset import transformers, CollectData, NsynthSubset
@@ -71,18 +72,26 @@ class OneShotAudioDataLoader(BaseDataLoader):
     With fixed_split=True, training uses the 'train' files and validation the
     'val' files of the fixed hash split (validation_split is ignored), and the
     'test' files are never loaded. `types` and `packs` filter both.
+
+    Fixed split only: `augment` (see OneShotAudioDataset) applies to the training
+    files, never to validation; `type_weights` (e.g. {"hat": 1.5, "cymbal": 1.5})
+    scales each file's sampling probability by its drum type (default 1), drawing
+    an epoch's worth of files with replacement.
     """
     def __init__(self, data_dir, sr=22050, chunk_size=110080,
                  batch_size=8, shuffle=True, validation_split=0.1,
-                 num_workers=4, fixed_split=False, **kwargs):
+                 num_workers=4, fixed_split=False, augment=None, type_weights=None, **kwargs):
+        self.type_weights = type_weights
         if not fixed_split:
+            assert augment is None and type_weights is None, 'augment/type_weights need fixed_split'
             self.dataset = OneShotAudioDataset(
                 path_to_dataset=data_dir, sr=sr, chunk_size=chunk_size, **kwargs)
             self.val_dataset = None
             super().__init__(self.dataset, batch_size, shuffle, validation_split, num_workers)
             return
         self.dataset = OneShotAudioDataset(
-            path_to_dataset=data_dir, sr=sr, chunk_size=chunk_size, split='train', **kwargs)
+            path_to_dataset=data_dir, sr=sr, chunk_size=chunk_size, split='train',
+            augment=augment, **kwargs)
         self.val_dataset = OneShotAudioDataset(
             path_to_dataset=data_dir, sr=sr, chunk_size=chunk_size, split='val', **kwargs)
         super().__init__(self.dataset, batch_size, shuffle, 0.0, num_workers)
@@ -90,6 +99,12 @@ class OneShotAudioDataLoader(BaseDataLoader):
     def _split_sampler(self, split):
         if self.val_dataset is None or not self.shuffle:
             return super()._split_sampler(split)
+        if self.type_weights:
+            assert self.dataset.drum_types is not None, 'type_weights need `types`'
+            w = torch.tensor([float(self.type_weights.get(t, 1.0)) for t in self.dataset.drum_types],
+                             dtype=torch.double, device='cpu')
+            self.shuffle = False
+            return WeightedRandomSampler(w, self.n_samples, replacement=True), None
         # Fixed split: shuffle via a SubsetRandomSampler over all training files.
         # With no sampler, DataLoader builds a RandomSampler whose CPU generator
         # fails under the 'torch.cuda.FloatTensor' default set in BaseTrainer.

@@ -12,6 +12,14 @@ import trainer.trainer as module_trainer
 
 def main(config):
     logger = config.get_logger('train')
+    seed = config.config.get('seed')
+    if seed is not None:              # weights, sampling order, augmentation, workers
+        import random
+        import numpy as np
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        logger.info(f'seed {seed}')
 
     # setup data_loader instances
     data_loader = config.initialize('data_loader', module_data)
