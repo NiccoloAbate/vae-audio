@@ -18,9 +18,17 @@
 # Resubmitting the same command continues the run from its latest checkpoint
 # (model, optimizer, discriminator and LR schedule). To queue a continuation
 # ahead of time:  sbatch -d afterany:<jobid> -J <name> train_vae_drums.sh <config>
+#
+# Fork: an optional 2nd argument, a checkpoint under $SCRATCH/runs/vae_drums/models
+# (glob ok), starts a new run from another run's weights, optimizer, discriminator and
+# schedule, e.g. an adversarial-stage arm from a pre-adversarial checkpoint:
+#   sbatch -J b01_r1 train_vae_drums.sh config_raw_drums_44k_b01_r1.json \
+#       'Drums_44k_b01/*/checkpoint-epoch450.pth'
+# It is only used while the new run has no checkpoints of its own.
 
 set -e
-CONFIG="${1:?usage: sbatch train_vae_drums.sh <config.json>}"
+CONFIG="${1:?usage: sbatch train_vae_drums.sh <config.json> [fork checkpoint]}"
+FORK="${2:-}"
 
 # --- 1. Environment Setup ---
 ml load system ffmpeg/7.1 system libsndfile/1.2.2
@@ -81,6 +89,12 @@ ckpts = glob.glob("$OUT_DIR/models/$NAME/*/checkpoint-epoch*.pth")
 print(max(ckpts, key=lambda p: int(re.search(r"epoch(\d+)\.pth$", p).group(1))) if ckpts else "")
 PYEOF
 )
+
+if [ -z "$CKPT" ] && [ -n "$FORK" ]; then
+    CKPT=$(ls $OUT_DIR/models/$FORK | tail -1)
+    [ -f "$CKPT" ] || { echo "Fork checkpoint not found: $FORK"; exit 1; }
+    echo "Forking $NAME from $CKPT"
+fi
 
 # --- 5. Training ---
 if [ -n "$CKPT" ]; then
