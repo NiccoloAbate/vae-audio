@@ -51,7 +51,13 @@ def load_logs(log_dir):
     """Per-epoch training metrics over every info.log of the run (later dirs win)."""
     merged = {}
     for p in sorted(glob.glob(os.path.join(log_dir, '*', 'info.log'))):
-        for k, (ep, val) in parse_log(Path(p)).items():
+        log = parse_log(Path(p))
+        if 'loss_disc' in log and 'disc_steps' not in log:
+            # older logs averaged loss_disc over all steps with 0 on the skipped ones
+            # (disc_update_every 2 in every such run): rescale to the per-update value
+            ep, val = log['loss_disc']
+            log['loss_disc'] = (ep, val * 2)
+        for k, (ep, val) in log.items():
             merged.setdefault(k, {}).update(zip(ep.tolist(), val.tolist()))
     return {k: (np.array(sorted(d)), np.array([d[e] for e in sorted(d)])) for k, d in merged.items()}
 
