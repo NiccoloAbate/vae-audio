@@ -31,6 +31,11 @@ def main(config):
 
     # get function handles of loss and metrics
     loss = getattr(module_loss, config['loss'])
+    loss_args = config.config.get('loss_args')
+    if loss_args:                     # e.g. {"fft_sizes": [8192, 4096, 2048, 1024, 512, 256]}
+        import functools
+        loss = functools.partial(loss, **loss_args)
+        logger.info(f'loss args {loss_args}')
     metrics = [getattr(module_metric, met) for met in config['metrics']]
 
     # build optimizer, learning rate scheduler. delete every lines containing lr_scheduler for disabling scheduler

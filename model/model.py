@@ -66,17 +66,61 @@ class AmplitudeOutput(nn.Module):
     both read from the decoder's last features. 2*sigmoid(a)**2.3 + 1e-7 can reach
     (near) zero, so silence is one saturated value instead of a waveform that must
     cancel exactly; a plain conv head leaves a buzz at the frame rate there."""
-    def __init__(self, in_ch, out_ch, amp_kernel, tanh=True):
+    def __init__(self, in_ch, out_ch, amp_kernel, tanh=True, noise_hop=0):
         super().__init__()
         self.wave = nn.Conv1d(in_ch, out_ch, 7, padding=3)
         self.amp = nn.Conv1d(in_ch, out_ch, amp_kernel, padding=amp_kernel // 2)
         self.tanh = tanh
+        self.noise = NoiseOutput(in_ch, out_ch, noise_hop) if noise_hop else None
 
     def forward(self, h):
         w = self.wave(h)
         if self.tanh:
             w = torch.tanh(w)
-        return w * (2 * torch.sigmoid(self.amp(h)) ** 2.3 + 1e-7)
+        y = w * mod_sigmoid(self.amp(h))
+        if self.noise is not None:
+            y = y + self.noise(h)
+        return y
+
+
+def mod_sigmoid(x):
+    return 2 * torch.sigmoid(x) ** 2.3 + 1e-7
+
+
+class NoiseOutput(nn.Module):
+    """RAVE's noise synthesizer: strided convs predict, per frame of `hop` samples,
+    the magnitude response (hop + 1 bins, 0..Nyquist) of a filter applied to white
+    noise. Filtering is done in the STFT domain (n_fft = 2*hop, Hann, 50% overlap-add)
+    rather than RAVE's per-block convolution, whose block seams would modulate the
+    noise at sr/hop. The -5 offset starts the branch near silent."""
+    def __init__(self, in_ch, out_ch, hop=128):
+        super().__init__()
+        ratios = []
+        h = hop
+        while h % 4 == 0 and h > 1:
+            ratios.append(4); h //= 4
+        while h % 2 == 0 and h > 1:
+            ratios.append(2); h //= 2
+        assert h == 1, f'noise_hop must be a power of 2, got {hop}'
+        layers = []
+        for i, r in enumerate(ratios):
+            last = i == len(ratios) - 1
+            layers.append(nn.Conv1d(in_ch, out_ch * (hop + 1) if last else in_ch, 3, stride=r, padding=1))
+            if not last:
+                layers.append(nn.LeakyReLU(0.2))
+        self.net = nn.Sequential(*layers)
+        self.hop, self.out_ch = hop, out_ch
+        self.register_buffer('window', torch.hann_window(2 * hop), persistent=False)
+
+    def forward(self, h):
+        B, T = h.shape[0], h.shape[-1]
+        mag = mod_sigmoid(self.net(h) - 5)                         # (B, C*(hop+1), T/hop)
+        mag = mag.reshape(B * self.out_ch, self.hop + 1, -1)
+        mag = torch.cat([mag, mag[..., -1:]], -1)                  # stft(center=True) has T/hop + 1 frames
+        noise = torch.rand(B * self.out_ch, T, device=h.device, dtype=h.dtype) * 2 - 1
+        X = torch.stft(noise, 2 * self.hop, self.hop, window=self.window, return_complex=True)
+        y = torch.istft(X * mag, 2 * self.hop, self.hop, window=self.window, length=T)
+        return y.reshape(B, self.out_ch, T)
 
 
 def _pqmf_prototype_filter(taps=62, cutoff_ratio=0.142, beta=9.0):
@@ -172,7 +216,7 @@ class RawAudioVAE(nn.Module):
         Total compression: 16 × 64 = 1024x
     """
     def __init__(self, latent_dim=64, channels=(32, 64, 128, 256, 512),
-                 strides=(4, 4, 4, 4), n_bands=None, amp_out=False):
+                 strides=(4, 4, 4, 4), n_bands=None, amp_out=False, noise_hop=0):
         super().__init__()
         channels = list(channels)
         strides  = list(strides)
@@ -210,9 +254,10 @@ class RawAudioVAE(nn.Module):
         for i, s in enumerate(reversed(strides)):
             dec.append(DecoderBlock(dec_ch[i], dec_ch[i + 1], s))
         dec.append(nn.LeakyReLU(0.2))
+        assert amp_out or not noise_hop, 'noise_hop needs amp_out'
         if amp_out:                 # waveform x amplitude envelope (AmplitudeOutput)
             dec.append(AmplitudeOutput(dec_ch[-1], out_ch, 2 * strides[0] + 1,
-                                       tanh=n_bands is None))
+                                       tanh=n_bands is None, noise_hop=noise_hop))
         else:
             dec.append(nn.Conv1d(dec_ch[-1], out_ch, 7, padding=3))
             if n_bands is None:

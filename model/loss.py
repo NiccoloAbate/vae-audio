@@ -44,9 +44,14 @@ def kld_temporal(mu, logvar, free_bits=1.0):
     return kl.sum(dim=(1, 2)).mean()
 
 
-def raw_audio_vae_loss(y, y_hat, mu, logvar, free_bits=0.25):
-    """Combined loss for RawAudioVAE: returns (recon_loss, kl_loss)."""
-    return multi_res_stft_loss(y, y_hat), kld_temporal(mu, logvar, free_bits)
+def raw_audio_vae_loss(y, y_hat, mu, logvar, free_bits=0.25, fft_sizes=None, hop_sizes=None):
+    """Combined loss for RawAudioVAE: returns (recon_loss, kl_loss). fft_sizes /
+    hop_sizes (config "loss_args") override the STFT scales; the loss averages over
+    scales, so adding scales changes the value's scale (val recon not comparable)."""
+    stft = {}
+    if fft_sizes:
+        stft = dict(fft_sizes=tuple(fft_sizes), hop_sizes=tuple(hop_sizes or [n // 4 for n in fft_sizes]))
+    return multi_res_stft_loss(y, y_hat, **stft), kld_temporal(mu, logvar, free_bits)
 
 
 def discriminator_loss(real_outputs, fake_outputs):
