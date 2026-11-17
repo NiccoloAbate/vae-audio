@@ -11,6 +11,10 @@ checkpoint every ~19k (pass the printed save_period to eval_trajectory.py --ever
 
 Run it once the dataset is final, where the data is:
     python make_v2_configs.py --data_dir /scratch/users/nlabate/datasets/drums_oneshots
+
+v3 = the same runs with the RAVE-style amplitude output (arch amp_out), which lets
+the decoder output true silence instead of a frame-rate buzz:
+    python make_v2_configs.py --data_dir ... --tag v3 --amp_out
 """
 
 import argparse
@@ -43,16 +47,18 @@ def main(args):
     for arm, over in ARMS.items():
         for seed in args.seeds:
             c = copy.deepcopy(base)
-            c['name'] = f'Drums_v2_{arm}{seed}'
+            c['name'] = f'Drums_{args.tag}_{arm}{seed}'
             c['seed'] = seed
             t = c['trainer']
             t.update(beta_warmup=ep['beta_warmup'], adv_start_epoch=ep['adv_start'],
                      epochs=ep['total'], early_stop=ep['total'], save_period=ep['save'])
             c['lr_scheduler']['args']['step_size'] = ep['lr_step']
             c['data_loader']['args']['exclude'] = args.exclude
+            if args.amp_out:
+                c['arch']['args']['amp_out'] = True
             t.update(over.get('trainer', {}))
             c['data_loader']['args'].update(over.get('data_loader', {}))
-            path = f'config_raw_drums_v2_{arm}{seed}.json'
+            path = f'config_raw_drums_{args.tag}_{arm}{seed}.json'
             json.dump(c, open(path, 'w'), indent=4)
             print('wrote', path)
 
@@ -62,5 +68,7 @@ if __name__ == '__main__':
     p.add_argument('--data_dir', required=True)
     p.add_argument('--base', default='config_raw_drums_44k_b005.json')
     p.add_argument('--seeds', type=int, nargs='+', default=[1, 2])
+    p.add_argument('--tag', default='v2', help='run names Drums_<tag>_<arm><seed>')
+    p.add_argument('--amp_out', action='store_true', help='RAVE-style amplitude output (v3)')
     p.add_argument('--exclude', default='splits/exclude_train.txt', help='from dedupe_splits.py')
     main(p.parse_args())

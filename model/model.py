@@ -61,6 +61,24 @@ class DecoderBlock(nn.Module):
         return self.res(self.conv(self.act(x)))
 
 
+class AmplitudeOutput(nn.Module):
+    """RAVE-style output layer: a waveform head times a learned amplitude envelope,
+    both read from the decoder's last features. 2*sigmoid(a)**2.3 + 1e-7 can reach
+    (near) zero, so silence is one saturated value instead of a waveform that must
+    cancel exactly; a plain conv head leaves a buzz at the frame rate there."""
+    def __init__(self, in_ch, out_ch, amp_kernel, tanh=True):
+        super().__init__()
+        self.wave = nn.Conv1d(in_ch, out_ch, 7, padding=3)
+        self.amp = nn.Conv1d(in_ch, out_ch, amp_kernel, padding=amp_kernel // 2)
+        self.tanh = tanh
+
+    def forward(self, h):
+        w = self.wave(h)
+        if self.tanh:
+            w = torch.tanh(w)
+        return w * (2 * torch.sigmoid(self.amp(h)) ** 2.3 + 1e-7)
+
+
 def _pqmf_prototype_filter(taps=62, cutoff_ratio=0.142, beta=9.0):
     """Kaiser-windowed sinc prototype lowpass filter for PQMF.
 
@@ -154,7 +172,7 @@ class RawAudioVAE(nn.Module):
         Total compression: 16 × 64 = 1024x
     """
     def __init__(self, latent_dim=64, channels=(32, 64, 128, 256, 512),
-                 strides=(4, 4, 4, 4), n_bands=None):
+                 strides=(4, 4, 4, 4), n_bands=None, amp_out=False):
         super().__init__()
         channels = list(channels)
         strides  = list(strides)
@@ -191,9 +209,14 @@ class RawAudioVAE(nn.Module):
         dec    = [nn.Conv1d(latent_dim, dec_ch[0], 1)]
         for i, s in enumerate(reversed(strides)):
             dec.append(DecoderBlock(dec_ch[i], dec_ch[i + 1], s))
-        dec += [nn.LeakyReLU(0.2), nn.Conv1d(dec_ch[-1], out_ch, 7, padding=3)]
-        if n_bands is None:
-            dec.append(nn.Tanh())   # raw waveform output clipped to [-1, 1]
+        dec.append(nn.LeakyReLU(0.2))
+        if amp_out:                 # waveform x amplitude envelope (AmplitudeOutput)
+            dec.append(AmplitudeOutput(dec_ch[-1], out_ch, 2 * strides[0] + 1,
+                                       tanh=n_bands is None))
+        else:
+            dec.append(nn.Conv1d(dec_ch[-1], out_ch, 7, padding=3))
+            if n_bands is None:
+                dec.append(nn.Tanh())   # raw waveform output clipped to [-1, 1]
         self.decoder = nn.Sequential(*dec)
 
     def encode(self, x):
