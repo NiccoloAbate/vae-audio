@@ -36,6 +36,23 @@ def get_device():
     return torch.device('cpu')
 
 
+def noise_gate(y, gate_db=-50.0, win=1024, ramp=441):
+    """Mute (B, L) or (L,) audio wherever its smoothed RMS envelope stays more than
+    gate_db below the clip's peak; 10 ms ramps at 44.1 kHz. Removes the decoder's
+    frame-rate buzz in silence (tonal, -50..-75 dB on most checkpoints)."""
+    single = (y.dim() == 1)
+    y = y.reshape(1, -1) if single else y
+    x = y.unsqueeze(1)
+    k = torch.hann_window(win, dtype=y.dtype, device=y.device)
+    env = torch.nn.functional.conv1d(x.pow(2), (k / k.sum()).view(1, 1, -1), padding=win // 2)
+    env = env[..., :y.shape[-1]].sqrt()
+    peak = y.abs().amax(-1, keepdim=True).unsqueeze(1)
+    m = (env > peak * 10 ** (gate_db / 20)).to(y.dtype)
+    m = torch.nn.functional.avg_pool1d(m, ramp, 1, ramp // 2, count_include_pad=False)
+    out = (x * m[..., :y.shape[-1]]).squeeze(1)
+    return out[0] if single else out
+
+
 def frame_activity(y, T, thresh_db=-50.0, dilate=2):
     """(N, L) decoded audio -> (N, T) float mask of latent frames where it sounds
     (frame RMS within thresh_db of the loudest frame, dilated by `dilate`)."""
@@ -356,22 +373,28 @@ class DrumEngine:
         return hold_peak(z[None], self._peak(z), frames, pad=self.z_silence)[0]
 
     # ---- decode / render --------------------------------------------------
-    def decode(self, z):
-        """z: (D, T_lat) or (B, D, T_lat) -> waveform np array (T,) or (B, T)."""
+    def decode(self, z, gate_db=None):
+        """z: (D, T_lat) or (B, D, T_lat) -> waveform np array (T,) or (B, T).
+        gate_db: noise_gate threshold relative to each clip's peak (None = off)."""
         single = (z.dim() == 2)
         if single:
             z = z.unsqueeze(0)
         with torch.no_grad():
-            y = self._decode_raw(z.to(self.device)).squeeze(1).cpu().numpy()  # (B, T)
+            y = self._decode_raw(z.to(self.device)).squeeze(1).cpu()       # (B, T)
+            if gate_db is not None:
+                y = noise_gate(y, gate_db)
+        y = y.numpy()
         return y[0] if single else y
 
-    def render(self, z, trim_db=-45.0, tail_ms=60.0, normalize=True):
-        """Decode then trim the trailing silence -> a usable one-shot.
+    def render(self, z, trim_db=-45.0, tail_ms=60.0, normalize=True, gate_db=-50.0):
+        """Decode, gate the decoder's buzz in silence, then trim the trailing
+        silence -> a usable one-shot.
 
         trim_db: cut once the signal stays this many dB below its peak.
         tail_ms: keep this much release after the last loud sample.
+        gate_db: noise_gate threshold below the peak (None = off).
         """
-        return self.trim(self.decode(z), trim_db, tail_ms, normalize)
+        return self.trim(self.decode(z, gate_db), trim_db, tail_ms, normalize)
 
     def trim(self, w, trim_db=-45.0, tail_ms=60.0, normalize=True):
         """Cut trailing silence (see render) and optionally peak-normalise."""
