@@ -19,6 +19,15 @@ value (see generate_drums.py) — mapping velocity/MIDI to a latent direction is
 the same operation, which is why the engine exposes the primitives rather than
 baking in one behaviour.
 
+Sampled decoding: training decodes z = mu + sigma * eps, never mu itself, and
+mu is off-distribution where a hit is silent (a tonal floor at -50 dB on v3
+models; sampled, -180 dB). With a bank that stores sigma and engine.sample on,
+latents are 'augmented', (2D, T) = [mu; sigma]: the time operations (warp,
+morph, stretch, punch) act on both halves alike, perturb / steer move mu only,
+and decode draws mu + sigma * eps with a fixed seed (engine.sample_seed), so a
+hit sounds the same on every render. Only each hit's own sigma map works: a
+per-dim sigma is worse than mu, unit sigma wrecks the hit.
+
 Decodes via the checkpoint directly (no export needed) or a traced decoder.pt
 (export_decoder.py) if given — the plugin will use the latter.
 """
@@ -26,6 +35,11 @@ import numpy as np
 import torch
 
 import model.model as module_arch
+
+
+# Control label per descriptor (control_sweeps.py). Applied on load too, so
+# directions.pt files saved under older names show the current ones.
+CONTROL_NAMES = {'brightness': 'Tone', 'noisiness': 'Noise', 'decay': 'Decay', 'attack': 'Attack'}
 
 
 def get_device():
@@ -211,6 +225,7 @@ class DrumEngine:
 
         # Latent bank (optional): dict from build_latent_bank.py, or a path
         self.bank = None
+        self.sample, self.sample_seed = False, 0          # see 'Sampled decoding' above
         if bank is not None:
             self.load_bank(bank)
 
@@ -221,11 +236,34 @@ class DrumEngine:
         self.bank = bank
         self.latent_dim = bank['latents'].shape[1]
         self.T_lat = bank['latents'].shape[2]
+        self.has_sigma = 'sigmas' in bank
+        self._cache = {}
         return self
 
+    def set_sample(self, on, seed=None):
+        """Decode mu + sigma * eps (on) or mu (off). Needs a bank with sigmas."""
+        if on and not self.has_sigma:
+            raise ValueError('bank has no sigmas: rebuild it with build_latent_bank.py')
+        self.sample = bool(on)
+        if seed is not None:
+            self.sample_seed = int(seed)
+        return self
+
+    def bank_z(self):
+        """All bank latents (N, D or 2D, T_lat), augmented when sampling."""
+        Z = self.bank['latents']
+        return torch.cat([Z, self.bank['sigmas']], 1) if self.sample else Z
+
     def z(self, idx):
-        """Latent (D, T_lat) for bank slot idx."""
-        return self.bank['latents'][idx].clone()
+        """Latent for bank slot idx: (D, T_lat), or (2D, T_lat) = [mu; sigma] when sampling."""
+        return self.bank_z()[idx].clone()
+
+    def _mu_part(self, z):
+        return z[..., :self.latent_dim, :]
+
+    def _pad_vec(self, v, z):
+        """A (D,) offset for mu, zero-padded for sigma when z is augmented."""
+        return torch.cat([v, torch.zeros_like(v)]) if z.shape[-2] == 2 * self.latent_dim else v
 
     def original(self, idx, **trim_kw):
         """The bank slot's source file as the model saw it (mono, onset-aligned,
@@ -260,9 +298,13 @@ class DrumEngine:
         s = torch.sin(omega)
         return (torch.sin((1 - t) * omega) * za + torch.sin(t * omega) * zb) / s
 
-    @staticmethod
-    def perturb(z, sigma, generator=None):
-        return z + sigma * torch.randn(z.shape, generator=generator)
+    def perturb(self, z, sigma, generator=None):
+        """Add sigma * N(0, 1) to mu, independently per frame (the app uses
+        variation() instead: this one moves silent frames and jitters over time) (not to an augmented latent's sigma half)."""
+        n = torch.randn(self._mu_part(z).shape, generator=generator)
+        out = z.clone()
+        out[..., :self.latent_dim, :] += sigma * n
+        return out
 
     # ---- knobs (latent directions from control_sweeps.py) -----------------
     def load_directions(self, path, keys=None, min_monotone=0.75, min_slope=0.1):
@@ -280,7 +322,10 @@ class DrumEngine:
                       and v['slope'] >= min_slope]
                 if ok:
                     keys.append(max(ok)[1])
-        self.knobs = {key: dirs[key] for key in keys}
+        self.knobs = {key: dict(dirs[key]) for key in keys}
+        for key, v in self.knobs.items():                    # e.g. active/noisiness/pca
+            desc = (key.split('/') + [''])[1]
+            v['analogue'] = CONTROL_NAMES.get(desc, v.get('analogue', key))
         self.knob_source = d.get('checkpoint')
         self.knob_grid = (min(d['grid']), max(d['grid']))     # the range that was swept
         return keys
@@ -291,13 +336,8 @@ class DrumEngine:
         sounding frames) and the n_dims raw latent dims that vary most across
         the bank. Each vector is one bank std long, so s = 1 moves a hit by
         about as much as hits differ along it. Keys: active/pc/<k>, active/dim/<d>."""
-        Z = self.bank['latents']
-        y = torch.from_numpy(self.decode(Z)).float()
-        m = frame_activity(y, Z.shape[-1])                               # (N, T)
-        X = (Z * m[:, None]).sum(2) / m.sum(1, keepdim=True).clamp_min(1)   # (N, D)
-        Xc = X - X.mean(0)
-        _, S, Vt = torch.linalg.svd(Xc, full_matrices=False)
-        std = S / max(len(X) - 1, 1) ** 0.5
+        X, std, Vt = self._bank_spread()
+        S = std * max(len(X) - 1, 1) ** 0.5
         var = (S ** 2) / (S ** 2).sum()
         self.explore = {}
         for k in range(min(n_pcs, len(S))):
@@ -312,32 +352,58 @@ class DrumEngine:
                 'info': f'raw latent dim {d} (bank std {dstd[d]:.2f})'}
         return list(self.explore)
 
-    def steer(self, z, values):
+    def _bank_spread(self):
+        """Once per bank: each hit's mean mu over its sounding frames X (N, D) and
+        their principal axes, std (K,) and Vt (K, D)."""
+        key = ('spread', self.sample)
+        if key not in self._cache:
+            y = torch.from_numpy(self.decode(self.bank_z())).float()
+            Z = self.bank['latents']
+            m = frame_activity(y, Z.shape[-1])                                  # (N, T)
+            X = (Z * m[:, None]).sum(2) / m.sum(1, keepdim=True).clamp_min(1)   # (N, D)
+            _, S, Vt = torch.linalg.svd(X - X.mean(0), full_matrices=False)
+            self._cache[key] = (X, S / max(len(X) - 1, 1) ** 0.5, Vt)
+        return self._cache[key]
+
+    def variation(self, amount, seed):
+        """A random constant offset (D,) for steer(): a draw from the spread of the
+        bank's hits (their covariance), times amount, so 1 moves a hit about as far
+        as a typical hit sits from the bank average, along directions hits really
+        differ in. Unlike perturb (fresh noise on every frame), it is the same on
+        every frame and steer() applies it only where the hit sounds."""
+        _, std, Vt = self._bank_spread()
+        n = torch.randn(len(std), generator=torch.Generator().manual_seed(int(seed)))
+        return float(amount) * (n * std) @ Vt
+
+    def steer(self, z, values, offset=None):
         """z (D, T_lat) + sum of s * knob vector, for values {key: s}, over the
-        knobs and the explore directions. 'active' keys only offset the frames
-        where the hit sounds, as they were fit."""
+        knobs and the explore directions, + offset (D,) if given (variation()).
+        'active' keys and the offset only move the frames where the hit sounds,
+        as the directions were fit."""
         values = {k: float(s) for k, s in values.items() if s}
-        if not values:
+        if not values and offset is None:
             return z
         dirs = {**(getattr(self, 'knobs', None) or {}), **(getattr(self, 'explore', None) or {})}
         mask = torch.ones(z.shape[-1])
-        if any(k.startswith('active/') for k in values):
+        if offset is not None or any(k.startswith('active/') for k in values):
             y = torch.from_numpy(self.decode(z)).float().unsqueeze(0)
             mask = frame_activity(y, z.shape[-1])[0]
         out = z.clone()
         for k, s in values.items():
             m = mask if k.startswith('active/') else torch.ones_like(mask)
-            out = out + s * dirs[k]['vector'][:, None] * m[None, :]
+            out = out + s * self._pad_vec(dirs[k]['vector'], z)[:, None] * m[None, :]
+        if offset is not None:
+            out = out + self._pad_vec(offset, z)[:, None] * mask[None, :]
         return out
 
     # ---- time surgery (see warp / morph_aligned above) ---------------------
     def _bank_timing(self):
         """Once per bank: each hit's (peak, end) frames and the silence latent."""
-        if getattr(self, '_timing', None) is None:
-            Z = self.bank['latents']
+        if self.sample not in self._cache:                # per decode mode
+            Z = self.bank_z()
             y = torch.from_numpy(self.decode(Z)).float()
-            self._timing = hit_timing(y, Z.shape[-1])
-            self.z_silence = silence_latent(Z, y)
+            self._cache[self.sample] = (hit_timing(y, Z.shape[-1]), silence_latent(Z, y))
+        self._timing, self.z_silence = self._cache[self.sample]
         return self._timing
 
     def _peak(self, z):
@@ -348,8 +414,14 @@ class DrumEngine:
         """Bank hits a -> b by amount t. blend / slerp: frame by frame as stored;
         aligned / tail / crossover: re-timed first (morph_aligned)."""
         za, zb = self.z(a_idx), self.z(b_idx)
-        if mode in ('blend', 'slerp'):
-            return (self.slerp if mode == 'slerp' else self.lerp)(za, zb, torch.tensor(float(t)))
+        t_ = torch.tensor(float(t))
+        if mode == 'slerp':                              # on mu; sigma (if any) blended
+            D = self.latent_dim
+            out = self.lerp(za, zb, t_)
+            out[:D] = self.slerp(za[:D], zb[:D], t_)
+            return out
+        if mode == 'blend':
+            return self.lerp(za, zb, t_)
         peak, end = self._bank_timing()
         return morph_aligned(za, zb, (peak[a_idx], end[a_idx]), (peak[b_idx], end[b_idx]),
                              t, mode, width, pad=self.z_silence)
@@ -379,6 +451,11 @@ class DrumEngine:
         single = (z.dim() == 2)
         if single:
             z = z.unsqueeze(0)
+        D = getattr(self, 'latent_dim', z.shape[1])
+        if z.shape[1] == 2 * D:                           # augmented: mu + sigma * eps
+            g = torch.Generator().manual_seed(int(self.sample_seed))
+            eps = torch.randn(z.shape[0], D, z.shape[2], generator=g)
+            z = z[:, :D] + z[:, D:].clamp_min(0) * eps
         with torch.no_grad():
             y = self._decode_raw(z.to(self.device)).squeeze(1).cpu()       # (B, T)
             if gate_db is not None:

@@ -3,7 +3,7 @@ Control sweeps: can linear latent directions act like drum-machine knobs?
 
 Classic drum-machine controls map onto measurable descriptors:
     Tone   -> brightness  log2 spectral centroid (octaves)
-    Snappy -> noisiness   log10 spectral flatness
+    Noise  -> noisiness   log10 spectral flatness
     Decay  -> decay       log10 time from the peak to the last sample within
                           30 dB of it
     Attack -> attack      log10 attack time (eval_pipeline.log_attack_time)
@@ -72,11 +72,10 @@ from sklearn.linear_model import RidgeCV
 from sklearn.model_selection import cross_val_predict
 
 from eval_pipeline import load_checkpoint, read_split, make_dataset, log_attack_time
-from drum_engine import frame_activity
+from drum_engine import frame_activity, CONTROL_NAMES as ANALOGUE
 from evaluate_raw import get_device
 
 KNOBS = ['brightness', 'noisiness', 'decay', 'attack']
-ANALOGUE = {'brightness': 'Tone', 'noisiness': 'Snappy', 'decay': 'Decay', 'attack': 'Attack'}
 
 
 # ---------------------------------------------------------------------------

@@ -7,8 +7,14 @@ samples --per_type of them (seeded at the medoid) so the bank is diverse rather
 than redundant. Stores the FULL temporal latent (D, T_lat) per hit — averaging
 would push the decoder off-distribution.
 
-Output: a .pt dict { latents (N,D,T_lat) float32, types [str], files [str],
+Output: a .pt dict { latents (N,D,T_lat) float32 (posterior mean mu),
+                      sigmas (N,D,T_lat) float32 (posterior std; the engine
+                      decodes mu + sigma * eps, as in training),
+                      types [str], files [str],
                       sr, chunk_size, latent_dim, checkpoint }.
+
+--refresh OLD.pt re-encodes the files of an existing bank instead (same slots,
+same order) with -r, e.g. to add sigmas to a bank built before they were stored.
 
 Usage:
     python build_latent_bank.py -r saved/models/DrumOneShots/checkpoint-epoch1500.pth \
@@ -70,6 +76,8 @@ def main():
                     help='restrict to these types (default: all found)')
     ap.add_argument('-o', '--output', default='bank/drums_bank.pt')
     ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--refresh', default=None, metavar='OLD.pt',
+                    help="re-encode this bank's files (same slots) instead of picking new ones")
     args = ap.parse_args()
 
     device = get_device()
@@ -77,6 +85,8 @@ def main():
     vae, dl = load_vae(args.resume)
     vae.to(device)
     sr, chunk = dl.get('sr', 22050), dl.get('chunk_size', 110080)
+    if args.refresh:
+        return refresh(args, vae, dl, device)
 
     dataset = OneShotAudioDataset(
         [args.data_dir], sr=sr, chunk_size=chunk,
@@ -90,7 +100,7 @@ def main():
     wanted = args.types or [t for t in TYPES if t in by_type and t != 'exclude']
 
     rng = np.random.default_rng(args.seed)
-    bank_lat, bank_type, bank_file = [], [], []
+    bank_lat, bank_sd, bank_type, bank_file = [], [], [], []
 
     for t in wanted:
         idxs = by_type.get(t, [])
@@ -98,19 +108,21 @@ def main():
             continue
         pick = rng.choice(idxs, min(args.encode_per_type, len(idxs)), replace=False)
 
-        pooled, full, files = [], [], []
+        pooled, full, sds, files = [], [], [], []
         with torch.no_grad():
             for j in pick:
                 _, _, y = dataset[int(j)]
-                mu, _, _ = vae.encode(y.float().unsqueeze(0).to(device))  # (1,D,T)
+                mu, logvar, _ = vae.encode(y.float().unsqueeze(0).to(device))  # (1,D,T)
                 mu = mu.squeeze(0).cpu()
                 full.append(mu)
+                sds.append((0.5 * logvar).exp().squeeze(0).cpu())
                 pooled.append(mu.mean(dim=1).numpy())                     # (D,)
                 files.append(dataset.files[int(j)])
 
         keep = fps(np.stack(pooled), args.per_type)
         for k in keep:
             bank_lat.append(full[k])
+            bank_sd.append(sds[k])
             bank_type.append(t)
             bank_file.append(files[k])
         print(f'  {t:>10}: encoded {len(pick):3d}, kept {len(keep)}')
@@ -118,11 +130,32 @@ def main():
     latents = torch.stack(bank_lat)  # (N, D, T)
     os.makedirs(os.path.dirname(args.output) or '.', exist_ok=True)
     torch.save({
-        'latents': latents, 'types': bank_type, 'files': bank_file,
+        'latents': latents, 'sigmas': torch.stack(bank_sd), 'types': bank_type, 'files': bank_file,
         'sr': sr, 'chunk_size': chunk, 'latent_dim': vae.latent_dim,
         'checkpoint': os.path.abspath(args.resume),
     }, args.output)
     print(f'\nSaved bank: {latents.shape} ({len(set(bank_type))} types) -> {args.output}')
+
+
+def refresh(args, vae, dl, device):
+    old = torch.load(args.refresh, map_location='cpu', weights_only=False)
+    sr, chunk = dl.get('sr', 22050), dl.get('chunk_size', 110080)
+    lat, sds = [], []
+    with torch.no_grad():
+        for f in old['files']:
+            ds = OneShotAudioDataset(os.path.dirname(f), sr=sr, chunk_size=chunk,
+                                     onset_thresh=dl.get('onset_thresh', 0.02),
+                                     pre_pad=dl.get('pre_pad', 256), peak_norm=dl.get('peak_norm', True))
+            ds.files = [f]
+            _, _, y = ds[0]
+            mu, logvar, _ = vae.encode(y.float().unsqueeze(0).to(device))
+            lat.append(mu.squeeze(0).cpu()); sds.append((0.5 * logvar).exp().squeeze(0).cpu())
+    new = dict(old, latents=torch.stack(lat), sigmas=torch.stack(sds),
+               sr=sr, chunk_size=chunk, latent_dim=vae.latent_dim,
+               checkpoint=os.path.abspath(args.resume))
+    print(f'mu change vs {args.refresh}: max |d| {(new["latents"] - old["latents"]).abs().max():.3g}')
+    torch.save(new, args.output)
+    print(f'Saved bank: {new["latents"].shape} with sigmas -> {args.output}')
 
 
 if __name__ == '__main__':
