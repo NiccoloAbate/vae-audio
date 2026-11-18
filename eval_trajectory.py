@@ -65,7 +65,8 @@ def main(args):
     print(f'{args.run}: {len(cks)} checkpoints, {len(done)} already scored')
     new_steps = not os.path.isfile(steps_csv)
     for e, path in cks.items():
-        name = f'{args.run}_ep{e}' + (f'_gate{-args.gate_db:g}' if args.gate_db is not None else '')
+        name = f'{args.run}_ep{e}' + (f'_gate{-args.gate_db:g}' if args.gate_db is not None else '') \
+            + (f'_zs{args.sample_z}' if args.sample_z is not None else '')
         if name in done:
             continue
         print(f'=== {name}', flush=True)
@@ -77,6 +78,8 @@ def main(args):
             cmd += ['-d', args.device]
         if args.gate_db is not None:
             cmd += ['--gate_db', str(args.gate_db)]
+        if args.sample_z is not None:
+            cmd += ['--sample_z', str(args.sample_z)]
         subprocess.run(cmd, check=True)
         shutil.rmtree(work, ignore_errors=True)      # ~50 MB of wavs per checkpoint
         step, adv = ckpt_info(path)
@@ -101,4 +104,5 @@ if __name__ == '__main__':
     p.add_argument('--fadtk', required=True)
     p.add_argument('-d', '--device')
     p.add_argument('--gate_db', type=float, help='passed to eval_pipeline.py; rows get a _gate<dB> suffix')
+    p.add_argument('--sample_z', type=int, help='passed to eval_pipeline.py; rows get a _zs<seed> suffix')
     main(p.parse_args())

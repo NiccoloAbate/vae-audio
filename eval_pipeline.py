@@ -29,6 +29,8 @@ Metrics (paired, per hit, then averaged):
               within x2; lat_bias = median signed error (> 0 = slower attack)
     fad       Frechet Audio Distance via fadtk (separate env, see below)
     gate_db   if set, the output was noise-gated (drum_engine.noise_gate) first
+    sample_z  if set, decoded z = mu + std*eps (seed sample_z), as in training;
+              otherwise z = mu. Decoders can be off-distribution at mu (v3: buzz)
     rtf       decode time / audio duration, batch 1 on CPU (plugin setting)
   latent usage (checkpoint mode only):
     pca_hit_95    PCs of the time-averaged latent (one vector per hit) for 95%
@@ -95,7 +97,7 @@ RESULT_FIELDS = ['name', 'mode', 'checkpoint', 'epoch', 'native_sr', 'eval_sr', 
                  'split', 'n', 'test_clean', 'stft', 'stft_native', 'lat_med', 'lat_within2',
                  'lat_bias', 'fad_model', 'fad', 'fad_inf_r2', 'rtf_cpu', 'decode_ms_cpu',
                  'pca_hit_95', 'pca_frame_95', 'kl_dims', 'trunc_k90', 'kl_total',
-                 'gen_ms_per_hit', 'gen_device', 'gate_db', 'timestamp']
+                 'gen_ms_per_hit', 'gen_device', 'gate_db', 'sample_z', 'timestamp']
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +341,7 @@ def load_checkpoint(resume, config_path=None):
 
 
 def run_checkpoint(model, cfg, data_dir, rel_files, eval_sr, eval_len, device, batch_size,
-                   kl_thresh=0.2, truncation=True, gate_db=None):
+                   kl_thresh=0.2, truncation=True, gate_db=None, sample_z=None):
     dl = cfg['data_loader']['args']
     sr, chunk = dl.get('sr', 22050), dl.get('chunk_size', 110080)
     ds = make_dataset(data_dir, rel_files, sr, chunk, onset_thresh=dl.get('onset_thresh', 0.02),
@@ -351,7 +353,13 @@ def run_checkpoint(model, cfg, data_dir, rel_files, eval_sr, eval_len, device, b
         for s in range(0, len(ds), batch_size):
             x = torch.stack([ds[i][2] for i in range(s, min(s + batch_size, len(ds)))])
             mu, logvar, _ = model.encode(x.to(device))
-            y = model.decode(mu).cpu()             # posterior mean: deterministic recon
+            if sample_z is None:
+                z = mu                             # posterior mean: deterministic recon
+            else:                                  # posterior sample, as the decoder was trained
+                g = torch.Generator().manual_seed(sample_z * 1000003 + s)
+                eps = torch.randn(mu.shape, generator=g).to(mu.device)
+                z = mu + eps * (0.5 * logvar).exp()
+            y = model.decode(z).cpu()
             if gate_db is not None:                # inference-time gate (drum_engine.noise_gate)
                 y = noise_gate(y[:, 0], gate_db).unsqueeze(1)
             mus.append(mu.cpu()); logvars.append(logvar.cpu())
@@ -558,13 +566,14 @@ def main(args):
         print(f'Checkpoint {args.resume} (epoch {epoch}) on {device}')
         outs, stft_native, extra, (pmu, mu_f, lv_f, curve) = run_checkpoint(
             model, cfg, args.data_dir, rel_files, args.eval_sr, args.eval_len, device,
-            args.batch_size, args.kl_thresh, not args.no_truncation, args.gate_db)
+            args.batch_size, args.kl_thresh, not args.no_truncation, args.gate_db, args.sample_z)
         if curve:
             plot_truncation(curve, extra['trunc_k90'], os.path.join(out_dir, 'truncation.png'))
             with open(os.path.join(out_dir, 'truncation.json'), 'w') as f:
                 json.dump({'curve': curve, 'k90': extra['trunc_k90']}, f, indent=1)
         row.update(extra, mode='checkpoint', checkpoint=args.resume, epoch=epoch,
-                   gate_db='' if args.gate_db is None else args.gate_db)
+                   gate_db='' if args.gate_db is None else args.gate_db,
+                   sample_z='' if args.sample_z is None else args.sample_z)
         if not extra['test_clean']:
             print('WARNING: this checkpoint was not trained with fixed_split; most test '
                   'hits were probably in its training set, so its scores are optimistic.')
@@ -643,6 +652,9 @@ if __name__ == '__main__':
     p.add_argument('--gate_db', type=float,
                    help='checkpoint mode: noise-gate the output this many dB below each '
                         'clip\'s peak before scoring, as DrumEngine.render does (e.g. -50)')
+    p.add_argument('--sample_z', type=int, metavar='SEED',
+                   help='checkpoint mode: decode mu + std*eps (this seed) instead of mu, '
+                        'as in training')
     p.add_argument('--kl_thresh', type=float, default=0.2,
                    help='nats; kl_dims counts dims above this (keep it above free_bits)')
     p.add_argument('--no_truncation', action='store_true',
