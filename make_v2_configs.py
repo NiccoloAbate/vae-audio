@@ -33,6 +33,11 @@ a complex-STFT discriminator to v3's waveform one; v5bal is the balancer alone:
           "balance": {"adv": 0.1, "fm": 0.1}, "balance_mode": "target", "balance_warmup": 10000}'
     python make_v2_configs.py --data_dir ... --tag v5bal --amp_out --arms B --seeds 1 --trainer_json \
         '{"balance": {"adv": 0.1, "fm": 0.1}, "balance_mode": "target", "balance_warmup": 10000}'
+
+v5global = v5data with one latent vector per hit instead of a frame sequence
+(GlobalRawAudioVAE, 128 dims): does decay / attack become a linear direction?
+    python make_v2_configs.py --data_dir ... --tag v5global --amp_out --arms B --seeds 1 --arch_json \
+        '{"type": "GlobalRawAudioVAE", "args": {"latent_dim": 128, "t_lat": 128, "coarse_ch": 128, "coarse_strides": [4, 4]}}'
 """
 
 import argparse
@@ -82,6 +87,10 @@ def main(args):
                 c['loss_args'] = {'fft_sizes': args.loss_fft, 'hop_sizes': [n // 4 for n in args.loss_fft]}
             t.update(over.get('trainer', {}))
             t.update(json.loads(args.trainer_json) if args.trainer_json else {})
+            if args.arch_json:
+                a = json.loads(args.arch_json)
+                c['arch']['type'] = a.get('type', c['arch']['type'])
+                c['arch']['args'].update(a.get('args', {}))
             c['data_loader']['args'].update(over.get('data_loader', {}))
             path = f'config_raw_drums_{args.tag}_{arm}{seed}.json'
             json.dump(c, open(path, 'w'), indent=4)
@@ -99,5 +108,6 @@ if __name__ == '__main__':
     p.add_argument('--loss_fft', type=int, nargs='+', help='STFT loss window sizes (hop = n/4)')
     p.add_argument('--arms', nargs='+', help='subset of arms (default all)')
     p.add_argument('--trainer_json', help='JSON dict merged into config["trainer"] last')
+    p.add_argument('--arch_json', help='JSON {"type": ..., "args": {...}} merged into config["arch"] last')
     p.add_argument('--exclude', default='splits/exclude_train.txt', help='from dedupe_splits.py')
     main(p.parse_args())

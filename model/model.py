@@ -287,6 +287,56 @@ class RawAudioVAE(nn.Module):
         return y_hat, mu, logvar, z
 
 
+class GlobalRawAudioVAE(RawAudioVAE):
+    """RawAudioVAE with ONE latent vector per clip, (B, latent_dim, 1), instead of a
+    sequence of frames: an ablation of the temporal latent, for onset-aligned
+    one-shots. Time structure (attack, decay) must then live in the latent dims
+    rather than in which frames are active.
+
+    Encoder: the RawAudioVAE encoder (B, C, t_lat) -> strided convs down to a coarse
+    grid (coarse_ch, t_lat / prod(coarse_strides)) -> flatten -> linear -> mu, logvar.
+    Flattening keeps absolute time (no pooling), since hits are onset-aligned.
+    Decoder: linear -> coarse grid -> nearest upsample + conv back to t_lat frames
+    -> the RawAudioVAE decoder (its input conv takes coarse_ch channels).
+    t_lat = chunk_size / prod(strides) must be given (65536 / 512 = 128)."""
+    def __init__(self, latent_dim=128, t_lat=128, coarse_ch=128, coarse_strides=(4, 4), **kw):
+        super().__init__(latent_dim=coarse_ch, **kw)
+        C = list(kw.get('channels', (32, 64, 128, 256, 512)))[-1]
+        self.latent_dim, self.t_lat = latent_dim, t_lat
+        t = t_lat
+        down, ch = [], C
+        for s in coarse_strides:
+            assert t % s == 0, f't_lat {t_lat} not divisible by coarse_strides {coarse_strides}'
+            down += [nn.Conv1d(ch, coarse_ch, 2 * s, s, padding=s // 2), nn.LeakyReLU(0.2)]
+            ch, t = coarse_ch, t // s
+        self.t_coarse = t
+        self.encoder_down = nn.Sequential(*down)            # 'encoder*': frozen with the encoder
+        flat = coarse_ch * t
+        self.mu_proj     = nn.Linear(flat, latent_dim)
+        self.logvar_proj = nn.Linear(flat, latent_dim)
+        self.decoder_in  = nn.Linear(latent_dim, flat)
+        up = []
+        for s in reversed(coarse_strides):
+            up += [nn.LeakyReLU(0.2), nn.Upsample(scale_factor=s, mode='nearest'),
+                   nn.Conv1d(coarse_ch, coarse_ch, 2 * s + 1, padding=s)]
+        self.decoder_up = nn.Sequential(*up)
+
+    def encode(self, x):
+        if self.pqmf is not None:
+            x = self.pqmf.analysis(x)
+        h = self.encoder(x)
+        assert h.shape[-1] == self.t_lat, f'encoder gave {h.shape[-1]} frames, t_lat is {self.t_lat}'
+        h = self.encoder_down(h).flatten(1)                  # (B, coarse_ch * t_coarse)
+        mu     = self.mu_proj(h).unsqueeze(-1)               # (B, D, 1)
+        logvar = self.logvar_proj(h).clamp(-30.0, 20.0).unsqueeze(-1)
+        z      = mu + torch.randn_like(mu) * (0.5 * logvar).exp()
+        return mu, logvar, z
+
+    def decode(self, z):
+        h = self.decoder_in(z.squeeze(-1)).view(z.shape[0], -1, self.t_coarse)
+        return super().decode(self.decoder_up(h))
+
+
 # ---------------------------------------------------------------------------
 # Specral Audio VAE
 # ---------------------------------------------------------------------------
