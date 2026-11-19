@@ -4,6 +4,7 @@ from torch.nn.utils import clip_grad_norm_
 from torchvision.utils import make_grid
 from base import BaseTrainer
 from model.model import MultiScaleDiscriminator, MultiScaleSpecDiscriminator
+from model.discriminators import HybridDiscriminator
 from model.loss import discriminator_loss, generator_adversarial_loss, feature_matching_loss
 
 
@@ -291,8 +292,16 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
         # norms), so their gradient never exceeds balance[k] x the recon gradient. Raising
         # weights would amplify a fresh discriminator's near-zero gradients ~1e5-fold.
         # e.g. {"adv": 0.02, "fm": 0.02}. None = off.
+        # balance_mode "target" sets the weight to balance[k] * |g_recon| / |g_k| instead
+        # (lambda ignored), so each term's gradient is that fraction of the recon one,
+        # ramped in over balance_warmup adversarial steps; |g_recon| is the smaller and
+        # |g_k| the larger of the EMA and this step's norm, so the target is a ceiling. On
+        # v2/v3 the plain lambdas gave adv and FM each only 0.1-0.8% of the recon gradient.
         self.balance       = cfg_adv.get('balance', None)
         self.balance_decay = cfg_adv.get('balance_decay', 0.999)
+        self.balance_mode  = cfg_adv.get('balance_mode', 'cap')
+        self.balance_warmup = cfg_adv.get('balance_warmup', 0)
+        assert self.balance_mode in ('cap', 'target'), self.balance_mode
         self._bal_ema      = {}
 
         # Discriminator (created here so it isn't exposed to train.py)
@@ -303,6 +312,9 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
 
         if disc_type == 'spectrogram':
             self.disc = MultiScaleSpecDiscriminator().to(self.device)
+        elif disc_type == 'hybrid':      # e.g. disc_args {"parts": ["msd", "mpd", "stft"]}
+            self.disc = HybridDiscriminator(msd_capacity=disc_capacity,
+                                            **cfg_adv.get('disc_args', {})).to(self.device)
         else:
             self.disc = MultiScaleDiscriminator(capacity=disc_capacity).to(self.device)
         self.disc_optimizer = torch.optim.Adam(
@@ -310,6 +322,9 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
         )
         self.logger.info(
             f'Discriminator: type={disc_type}, capacity={disc_capacity}, '
+            f'params={sum(p.numel() for p in self.disc.parameters()) / 1e6:.1f}M, '
+            f'groups={getattr(self.disc, "groups", None)}, '
+            f'balance_mode={self.balance_mode}, balance_warmup={self.balance_warmup}, '
             f'disc_lr={disc_lr:.2e}, update_every={self.disc_update_every}, '
             f'lambda_fm={self.lambda_fm}, r1_gamma={self.r1_gamma}, balance={self.balance}'
         )
@@ -369,6 +384,9 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
         total_disc = total_gen_adv = total_fm = 0
         total_r1 = n_disc = 0              # discriminator metrics average over update steps only
         bal_scales = {k: [] for k in (self.balance or {})}
+        bal_ratios = {k: [] for k in (self.balance or {})}   # weighted |g_k| / |g_recon|
+        groups = getattr(self.disc, 'groups', None)
+        disc_by_group = {name: 0.0 for name, _ in (groups or [])}
 
         # Stability diagnostics, logged once per epoch
         skipped = disc_skipped = n_clipped = 0   # non-finite VAE batches / disc steps; clipped steps
@@ -417,6 +435,13 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
                         self._warn_skipped(epoch, batch_idx, disc_skipped, 'non-finite discriminator gradient')
                     n_disc += 1
                     total_disc += loss_disc.item()
+                    if groups:
+                        i = 0
+                        with torch.no_grad():
+                            for name, n_g in groups:
+                                disc_by_group[name] += discriminator_loss(
+                                    real_out[i:i + n_g], fake_out_d[i:i + n_g]).item()
+                                i += n_g
 
                 # ── Adversarial + Feature-Matching losses for VAE ─────────
                 # Always compute real_out for FM (no disc update on off-steps).
@@ -445,10 +470,11 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
             step_ok = bool(torch.isfinite(vae_loss))
             if step_ok and use_adv and self.balance:
                 kl_term = None if self._encoder_frozen else beta * loss_kl
-                scales = self._balanced_backward(y_hat, loss_recon, kl_term,
-                                                 {'adv': loss_gen_adv, 'fm': loss_fm})
+                scales, ratios = self._balanced_backward(y_hat, loss_recon, kl_term,
+                                                         {'adv': loss_gen_adv, 'fm': loss_fm})
                 for k, s in scales.items():
                     bal_scales[k].append(s)
+                    bal_ratios[k].append(ratios[k])
             elif step_ok:
                 vae_loss.backward()
             if step_ok:
@@ -532,6 +558,9 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
             for k, s in bal_scales.items():
                 if s:
                     log[f'bal_{k}_scale'] = float(np.mean(s))
+                    log[f'bal_{k}_ratio'] = float(np.mean(bal_ratios[k]))
+            for name, v in disc_by_group.items():
+                log[f'loss_disc_{name}'] = v / max(n_disc, 1)
         if skipped or disc_skipped:
             self.logger.warning(f'Epoch {epoch}: skipped {skipped}/{n_batches} batches and '
                                 f'{disc_skipped} discriminator steps (non-finite values).')
@@ -554,15 +583,23 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
             if np.isfinite(norm):
                 self._bal_ema[k] = norm if k not in self._bal_ema else d * self._bal_ema[k] + (1 - d) * norm
         lam = {'adv': self.lambda_adv, 'fm': self.lambda_fm}
-        scales = {k: min(lam[k], self.balance[k] * self._bal_ema['recon'] / max(self._bal_ema[k], 1e-12))
-                  for k in self.balance}
+        if self.balance_mode == 'target':
+            ramp = min(1.0, self._adv_step / self.balance_warmup) if self.balance_warmup else 1.0
+            g_rec_ref = min(self._bal_ema['recon'], grads['recon'].norm().item())
+            scales = {k: ramp * self.balance[k] * g_rec_ref
+                      / max(self._bal_ema[k], grads[k].norm().item(), 1e-12) for k in self.balance}
+        else:
+            scales = {k: min(lam[k], self.balance[k] * self._bal_ema['recon'] / max(self._bal_ema[k], 1e-12))
+                      for k in self.balance}
+        g_rec = max(grads['recon'].norm().item(), 1e-12)
+        ratios = {k: scales[k] * grads[k].norm().item() / g_rec for k in self.balance}
         total = grads['recon'] + sum(scales[k] * grads[k] for k in self.balance)
         tensors, grad_tensors = [y_hat], [total]
         if kl_term is not None:
             tensors.append(kl_term.sum())
             grad_tensors.append(None)
         torch.autograd.backward(tensors, grad_tensors)
-        return scales
+        return scales, ratios
 
     def _warn_skipped(self, epoch, batch_idx, count, reason):
         if count <= 5:                   # the per-epoch total is logged anyway
