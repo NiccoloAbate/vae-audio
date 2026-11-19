@@ -1,0 +1,2 @@
+#pragma once
+#define LDM_DEFAULT_KIT "@LDM_DEFAULT_KIT@"

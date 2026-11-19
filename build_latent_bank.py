@@ -76,6 +76,8 @@ def main():
                     help='restrict to these types (default: all found)')
     ap.add_argument('-o', '--output', default='bank/drums_bank.pt')
     ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--avoid', nargs='+', default=[], metavar='BANK.pt',
+                    help='skip hits already in these banks (to build banks of different drums)')
     ap.add_argument('--refresh', default=None, metavar='OLD.pt',
                     help="re-encode this bank's files (same slots) instead of picking new ones")
     args = ap.parse_args()
@@ -93,10 +95,16 @@ def main():
         onset_thresh=dl.get('onset_thresh', 0.02),
         pre_pad=dl.get('pre_pad', 256), peak_norm=dl.get('peak_norm', True))
 
-    # Bucket dataset indices by type
+    # Bucket dataset indices by type (minus hits in --avoid banks)
+    avoid = set()
+    for b in args.avoid:
+        avoid |= {os.path.abspath(f) for f in torch.load(b, map_location='cpu', weights_only=False)['files']}
     by_type = {}
     for i, f in enumerate(dataset.files):
-        by_type.setdefault(classify(f), []).append(i)
+        if os.path.abspath(f) not in avoid:
+            by_type.setdefault(classify(f), []).append(i)
+    if avoid:
+        print(f'  avoiding {len(avoid)} hits from {len(args.avoid)} bank(s)')
     wanted = args.types or [t for t in TYPES if t in by_type and t != 'exclude']
 
     rng = np.random.default_rng(args.seed)

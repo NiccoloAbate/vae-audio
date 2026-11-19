@@ -129,3 +129,6 @@ bank/
 .idea/
 __MACOSX/
 **.DS_Store
+
+# exported plugin kits (export_kit.py)
+kits/
