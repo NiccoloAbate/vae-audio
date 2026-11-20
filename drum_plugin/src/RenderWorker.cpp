@@ -60,7 +60,46 @@ ldm::LayerSetPtr RenderWorker::getSet (int pad) const
 
 bool RenderWorker::isBusy() const
 {
-    return loadRequested || rendering || (dirty.load() != 0 && getKit() != nullptr);
+    return loadRequested || rendering || encodeRequested || (dirty.load() != 0 && getKit() != nullptr);
+}
+
+void RenderWorker::requestEncode (const EncodeRequest& r)
+{
+    {
+        const juce::ScopedLock sl (lock);
+        encodeQueue.push_back (r);
+    }
+    encodeRequested = true;
+    notify();
+}
+
+void RenderWorker::encodePending (KitModel& k)
+{
+    std::vector<EncodeRequest> jobs;
+    {
+        const juce::ScopedLock sl (lock);
+        jobs.swap (encodeQueue);
+        encodeRequested = false;
+    }
+    for (auto& r : jobs)
+    {
+        try
+        {
+            const auto t0 = juce::Time::getMillisecondCounterHiRes();
+            auto hit = ldm::encodeFile (r.file, k);
+            setStatus ("encoded " + r.file.getFileName() + " in "
+                       + juce::String (juce::roundToInt (juce::Time::getMillisecondCounterHiRes() - t0)) + " ms");
+            if (onHitEncoded)
+            {
+                auto cb = onHitEncoded;
+                juce::MessageManager::callAsync ([cb, hit, r] { cb (hit, r); });
+            }
+        }
+        catch (const std::exception& e)
+        {
+            setStatus ("could not encode " + r.file.getFileName() + ": " + e.what());
+        }
+    }
 }
 
 bool RenderWorker::waitUntilIdle (int timeoutMs) const
@@ -160,6 +199,12 @@ void RenderWorker::run()
         bool waiting = false;
         if (auto k = getKit())
         {
+            if (encodeRequested)
+            {
+                rendering = true;
+                encodePending (*k);
+                rendering = false;
+            }
             for (int p = 0; p < ldm::kNumPads && ! threadShouldExit(); ++p)
             {
                 const uint32_t bit = 1u << p;
@@ -184,7 +229,7 @@ void RenderWorker::run()
                                          [] (const ldm::LayerSetPtr& s) { return s.use_count() == 1; }),
                          graveyard.end());
 
-        if (! loadRequested && (dirty.load() == 0 || getKit() == nullptr))
+        if (! loadRequested && ! (encodeRequested && getKit() != nullptr) && (dirty.load() == 0 || getKit() == nullptr))
             wait (graveyard.empty() ? 1000 : 100);
         else if (waiting)
             wait (5);

@@ -55,6 +55,18 @@ Per pad:
 - **Velocity -> / Vel. depth / Vel. -> gain**: see *Velocity* below.
 - **Gain, Pan, Choke, Self-choke**: playback only, with no re-render. The hats share choke group 1.
 
+**Your own samples:** drag audio files (wav, aiff, flac, mp3, ...) onto the window:
+- onto a pad: sets its Slot A (with two files: A and B);
+- onto the Slot A or Slot B box: sets that slot of the selected pad;
+- anywhere else on the right panel: Slot A.
+
+The file is prepared like the training data (mono, 44.1 kHz, onset placed at 512
+samples, the first 1.49 s, peak 0.95), then encoded (about 0.3 s). It appears under
+"your hits" in the slot menus (slots 400+) and works with every control and morph.
+Your hits are stored as latents in the session, so a project reopens without the
+files. The file path is kept too: loading a kit built on a different model re-encodes
+them. Kits exported before the encoder existed can't encode (re-export them).
+
 Global: master level, the decode seed (the σ·ε draw of the sampled decode), and
 an optional −50 dB noise gate (not needed with sampled decoding).
 

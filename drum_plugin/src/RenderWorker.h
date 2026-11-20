@@ -11,6 +11,7 @@
 #include <juce_core/juce_core.h>
 #include <juce_events/juce_events.h>
 #include "Layers.h"
+#include "HitLoader.h"
 
 #include <atomic>
 #include <functional>
@@ -28,6 +29,18 @@ public:
     // Called on the message thread after a kit loads; assignDefaults is false
     // when the host restored a session after the request.
     std::function<void (std::shared_ptr<KitModel>, bool assignDefaults)> onKitLoaded;
+
+    // Encoding dropped samples (worker thread); the result goes to onHitEncoded on
+    // the message thread. replaceIndex >= 0: re-encode an existing user hit.
+    struct EncodeRequest
+    {
+        juce::File file;
+        int pad = -1;
+        bool slotB = false;
+        int replaceIndex = -1;
+    };
+    std::function<void (std::shared_ptr<UserHit>, EncodeRequest)> onHitEncoded;
+    void requestEncode (const EncodeRequest& r);
 
     void start();
     void requestKit (const juce::File& kitPt, bool assignDefaults);
@@ -48,6 +61,7 @@ public:
 private:
     void run() override;
     void loadPending();
+    void encodePending (KitModel& kit);
     void renderOne (int pad, KitModel& kit);
     void setStatus (const juce::String& s);
 
@@ -63,5 +77,7 @@ private:
 
     mutable juce::CriticalSection lock;            // pendingKit, kitFile, status
     juce::File pendingKit, kitFile;
+    std::vector<EncodeRequest> encodeQueue;
+    std::atomic<bool> encodeRequested { false };
     juce::String status { "no kit" };
 };

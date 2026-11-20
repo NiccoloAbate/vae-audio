@@ -1,10 +1,11 @@
-// kit_render_test <kit.pt> <out.wav> [slotA] [velTarget]
+// kit_render_test <kit.pt> <out.wav> [slotA | sample.wav] [velTarget]
 // Renders one pad the way the plugin does (16 velocity layers x 2 variations,
 // velocity -> Control 1 by default), reports timing and writes the layers one
 // after another (soft to loud) to a WAV file.
 
 #include <juce_audio_formats/juce_audio_formats.h>
 #include "Layers.h"
+#include "HitLoader.h"
 
 int main (int argc, char* argv[])
 {
@@ -27,6 +28,28 @@ int main (int argc, char* argv[])
 
     ldm::PadRecipe r;
     r.slotA = argc > 3 ? juce::String (argv[3]).getIntValue() : 0;
+    if (argc > 3 && ! juce::String (argv[3]).containsOnly ("0123456789"))     // a sample file: encode it
+    {
+        try
+        {
+            t0 = juce::Time::getMillisecondCounterHiRes();
+            const auto in = juce::File::getCurrentWorkingDirectory().getChildFile (argv[3]);
+            r.userA = ldm::encodeFile (in, *kit);
+            // debugging aids: the prepared input and the latent mean, raw float32
+            juce::String err;
+            auto prep = ldm::prepareHit (in, *kit, err);
+            juce::File (juce::String (argv[2]) + ".prep.f32").replaceWithData (prep.data(), prep.size() * sizeof (float));
+            juce::File (juce::String (argv[2]) + ".mu.f32").replaceWithData (r.userA->mu.data(), r.userA->mu.size() * sizeof (float));
+            std::cout << "encoded " << r.userA->name << " (peak frame " << r.userA->peak << ", end " << r.userA->end
+                      << ") in " << juce::roundToInt (juce::Time::getMillisecondCounterHiRes() - t0) << " ms\n";
+            r.slotA = ldm::kUserSlotBase;
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "encode failed: " << e.what() << "\n";
+            return 1;
+        }
+    }
     r.slotB = (r.slotA + 1) % (int) kit->entries().size();
     r.variation = 0.1f;
     r.roundRobin = 2;

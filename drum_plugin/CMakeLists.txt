@@ -41,7 +41,7 @@ FetchContent_MakeAvailable(JUCE)
 set(LDM_DEFAULT_KIT "${CMAKE_CURRENT_SOURCE_DIR}/../kits/v3_B1/kit.pt" CACHE FILEPATH "kit.pt loaded by default")
 configure_file(src/BuildConfig.h.in "${CMAKE_CURRENT_BINARY_DIR}/generated/BuildConfig.h")
 
-set(LDM_CORE_SOURCES src/KitModel.cpp src/Layers.cpp)
+set(LDM_CORE_SOURCES src/KitModel.cpp src/Layers.cpp src/HitLoader.cpp)
 
 function(ldm_common target)
     target_include_directories(${target} PRIVATE src "${CMAKE_CURRENT_BINARY_DIR}/generated" ${TORCH_INCLUDE_DIRS})

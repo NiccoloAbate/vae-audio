@@ -13,6 +13,8 @@ RenderJob makeJob (const PadRecipe& r, const KitModel& kit, int& numLayers, int&
     RenderJob job;
     job.slotA = r.slotA;
     job.slotB = r.slotB;
+    job.userA = r.userA;
+    job.userB = r.userB;
     job.mode = juce::jlimit (0, juce::jmax (0, kit.modeNames().size() - 1), r.mode);
     job.width = r.width;
     job.decodeSeed = r.decodeSeed;

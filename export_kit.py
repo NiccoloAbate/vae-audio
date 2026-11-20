@@ -9,7 +9,12 @@ hits from a latent recipe, plus a JSON sidecar describing the bank and controls.
                 -> controls + variation offset on the sounding frames
                 -> punch -> decay stretch -> sampled decode (mu + sigma * eps) -> gate
               for a batch of L rows (e.g. velocity layers), returning (L, samples).
-    kit.json  sr, samples, bank entries (name, type, file), control names, seeds.
+              encode(x) turns a prepared hit (mono, 44.1 kHz, onset-aligned,
+              peak 0.95, `samples` long; see the preprocessing fields in kit.json)
+              into (mu, sigma, timing) for render_z(), so dropped samples go
+              through the same chain as bank hits.
+    kit.json  sr, samples, preprocessing, bank entries (name, type, file), control
+              names, seeds, and the checkpoint (latents are only valid for it).
 
 Randomness comes from tables made with the app's seeds (torch.manual_seed(s)), so a
 plugin seed s sounds like the app's seed s. Two differences from the app: the
@@ -24,6 +29,8 @@ peak for decay, final).
 import argparse
 import json
 import os
+
+from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -86,10 +93,22 @@ def noise_gate(y: torch.Tensor, gate_db: float, win: int = 1024, rmp: int = 441)
     return (x * m[..., :y.shape[-1]]).squeeze(1)
 
 
+class EncoderOnly(nn.Module):
+    """RawAudioVAE.encode without the sampling: x (B, 1, L) -> mu, logvar (B, D, T)."""
+    def __init__(self, vae):
+        super().__init__()
+        self.encoder, self.mu_proj, self.logvar_proj = vae.encoder, vae.mu_proj, vae.logvar_proj
+
+    def forward(self, x):
+        h = self.encoder(x)
+        return self.mu_proj(h), self.logvar_proj(h).clamp(-30.0, 20.0)
+
+
 class KitRenderer(nn.Module):
-    def __init__(self, decoder, latents, sigmas, timing_peak, timing_end, z_silence,
+    def __init__(self, encoder, decoder, latents, sigmas, timing_peak, timing_end, z_silence,
                  directions, var_std, var_vt, var_normals, eps, sr: int):
         super().__init__()
+        self.encoder = encoder
         self.decoder = decoder
         self.register_buffer('mu', latents)                # (N, D, T)
         self.register_buffer('sigma', sigmas)              # (N, D, T)
@@ -114,8 +133,27 @@ class KitRenderer(nn.Module):
     def aug(self, i: int) -> torch.Tensor:
         return torch.cat([self.mu[i], self.sigma[i]], 0)
 
-    def morph(self, a: int, b: int, t: float, mode: int, width: float) -> torch.Tensor:
-        za, zb = self.aug(a), self.aug(b)
+    @torch.jit.export
+    def entry(self, i: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Bank hit i: augmented latent (2D, T) and timing (peak, end) frames."""
+        return self.aug(i), torch.stack([self.peak[i], self.end[i]])
+
+    @torch.jit.export
+    def encode(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Prepared hit x (samples,) -> mu (D, T), sigma (D, T), timing (2,) = peak and
+        end frame (last frame within 30 dB of the peak) of its sampled decode."""
+        mu, logvar = self.encoder(x.to(self.mu.device).view(1, 1, -1))
+        sigma = (0.5 * logvar).exp()
+        y = self.decode(torch.cat([mu, sigma], 1), 0)
+        rms = frame_rms(y, self.T)[0]
+        peak = rms.argmax()
+        loud = (rms >= rms.max() * 10 ** (-30.0 / 20)).long()
+        end = (loud * torch.arange(self.T, device=rms.device)).argmax()
+        end = torch.maximum(end, peak + 1)
+        return mu[0], sigma[0], torch.stack([peak, end]).float()
+
+    def morph(self, za: torch.Tensor, zb: torch.Tensor, ta: torch.Tensor, tb: torch.Tensor,
+              t: float, mode: int, width: float) -> torch.Tensor:
         D, T = self.D, self.T
         if mode == 0 or (mode >= 2 and (t <= 0.0 or (t >= 1.0 and mode != 3))):
             if mode >= 2:
@@ -130,7 +168,7 @@ class KitRenderer(nn.Module):
                 s = torch.sin(omega)
                 out[:D] = (torch.sin((1 - t) * omega) * ua + torch.sin(t * omega) * ub) / s
             return out
-        pa, ea, pb, eb = self.peak[a], self.end[a], self.peak[b], self.end[b]
+        pa, ea, pb, eb = ta[0], ta[1], tb[0], tb[1]
         La, Lb = ea - pa, eb - pb
         L = torch.exp((1 - t) * La.log() + t * Lb.log())
         p = pa if mode == 3 else (1 - t) * pa + t * pb
@@ -151,13 +189,27 @@ class KitRenderer(nn.Module):
                controls: torch.Tensor, var_amount: torch.Tensor, var_seed: torch.Tensor,
                decay: torch.Tensor, punch: torch.Tensor, decode_seed: int,
                gate_db: float) -> torch.Tensor:
-        """L rows: morph (L,), controls (L, K) in direction units, var_amount (L,),
-        var_seed (L,) long, decay (L,) as log2 tail factor, punch (L,) frames.
-        gate_db <= -200 turns the gate off. Returns (L, samples)."""
+        """render_z() for bank hits a, b."""
+        za, ta = self.entry(a)
+        zb, tb = self.entry(b)
+        return self.render_z(za, zb, ta, tb, mode, width, morph, controls, var_amount, var_seed,
+                             decay, punch, decode_seed, gate_db)
+
+    @torch.jit.export
+    def render_z(self, za: torch.Tensor, zb: torch.Tensor, ta: torch.Tensor, tb: torch.Tensor,
+                 mode: int, width: float, morph: torch.Tensor,
+                 controls: torch.Tensor, var_amount: torch.Tensor, var_seed: torch.Tensor,
+                 decay: torch.Tensor, punch: torch.Tensor, decode_seed: int,
+                 gate_db: float) -> torch.Tensor:
+        """Hits A, B as augmented latents [mu; sigma] (2D, T) with timing (2,) from
+        entry() or encode(). L rows: morph (L,), controls (L, K) in direction units,
+        var_amount (L,), var_seed (L,) long, decay (L,) as log2 tail factor, punch (L,)
+        frames. gate_db <= -200 turns the gate off. Returns (L, samples)."""
         L = int(morph.shape[0])
         D, T = self.D, self.T
         dev = self.mu.device
-        z = torch.stack([self.morph(a, b, float(morph[i]), mode, width) for i in range(L)])
+        za, zb, ta, tb = za.to(dev), zb.to(dev), ta.to(dev), tb.to(dev)
+        z = torch.stack([self.morph(za, zb, ta, tb, float(morph[i]), mode, width) for i in range(L)])
         # controls + variation: one constant offset of mu, on the sounding frames
         off = controls.to(dev) @ self.directions                                   # (L, D)
         seeds = var_seed.to(dev).long()
@@ -223,7 +275,8 @@ def build(args):
         dec = torch.jit.trace(e._vae.decoder.eval(), torch.zeros(1, e.latent_dim, e.T_lat), check_trace=False)
     finally:
         M.mod_sigmoid = orig
-    kit = KitRenderer(dec, e.bank['latents'].float(), e.bank['sigmas'].float(), peak, end, z_sil.float(),
+    enc = torch.jit.trace(EncoderOnly(e._vae).eval(), torch.zeros(1, 1, e.chunk_size), check_trace=False)
+    kit = KitRenderer(enc, dec, e.bank['latents'].float(), e.bank['sigmas'].float(), peak, end, z_sil.float(),
                       directions, std.float(), vt.float(), var_normals.float(), eps.float(), int(e.sr))
     return e, torch.jit.script(kit.eval()), keys, names
 
@@ -260,6 +313,24 @@ def check_parity(e, kit, keys, out_dir):
               f'max|dy| {(ya - yb).abs().max():.2e}, spec {(S(ya) - S(yb)).abs().mean():.3f}')
 
 
+def check_encode(e, kit):
+    """kit.encode on dataset-prepared bank files == the bank's mu / sigma."""
+    from dataset.datasets import OneShotAudioDataset
+    worst = 0.0
+    for i in range(0, len(e.bank['files']), max(1, len(e.bank['files']) // 6)):
+        f = e.bank['files'][i]
+        if not os.path.isfile(f):
+            continue
+        ds = OneShotAudioDataset(os.path.dirname(f), sr=e.sr, chunk_size=e.chunk_size, **e._preprocess)
+        ds.files = [f]
+        x = ds[0][2].reshape(-1).float()
+        with torch.no_grad():
+            mu, sigma, timing = kit.encode(x)
+        worst = max(worst, (mu - e.bank['latents'][i]).abs().max().item(),
+                    (sigma - e.bank['sigmas'][i]).abs().max().item())
+    print(f'encode vs bank (mu, sigma): max |d| {worst:.2e}')
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('-r', '--resume', required=True)
@@ -280,6 +351,7 @@ def main():
         'checkpoint': os.path.abspath(args.resume), 'bank': os.path.abspath(args.bank),
         'sr': int(e.sr), 'samples': int(e.chunk_size), 'latent_dim': int(e.latent_dim), 't_lat': int(e.T_lat),
         'modes': MODES, 'n_seeds': args.n_seeds,
+        'preprocess': {k: (bool(v) if k == 'peak_norm' else v) for k, v in e._preprocess.items()},
         'controls': [{'name': n, 'key': k} for n, k in zip(names, keys)],
         'entries': [{'name': os.path.splitext(os.path.basename(f))[0], 'type': t, 'file': f}
                     for f, t in zip(e.bank['files'], e.bank['types'])],
@@ -288,7 +360,9 @@ def main():
     print(f'Saved {args.out_dir}/kit.pt + kit.json: {len(meta["entries"])} hits, '
           f'controls {[c["name"] for c in meta["controls"]]}')
     if not args.no_check:
-        check_parity(e, torch.jit.load(os.path.join(args.out_dir, 'kit.pt')), keys, args.out_dir)
+        loaded = torch.jit.load(os.path.join(args.out_dir, 'kit.pt'))
+        check_parity(e, loaded, keys, args.out_dir)
+        check_encode(e, loaded)
 
 
 if __name__ == '__main__':

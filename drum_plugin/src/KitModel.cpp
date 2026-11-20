@@ -35,6 +35,13 @@ std::shared_ptr<KitModel> KitModel::load (const juce::File& kitPt, juce::String&
     if (auto* arr = meta.getProperty ("controls", {}).getArray())
         for (auto& c : *arr)
             k->controls.add (c.getProperty ("name", "").toString());
+    k->latentDim = (int) meta.getProperty ("latent_dim", 32);
+    k->tLat = (int) meta.getProperty ("t_lat", 128);
+    k->modelId = meta.getProperty ("checkpoint", "").toString();
+    auto pre = meta.getProperty ("preprocess", {});
+    k->onsetThresh = (float) (double) pre.getProperty ("onset_thresh", 0.02);
+    k->prePad = (int) pre.getProperty ("pre_pad", 512);
+    k->peakNorm = (bool) pre.getProperty ("peak_norm", true);
     if (auto* arr = meta.getProperty ("modes", {}).getArray())
         for (auto& m : *arr)
             k->modes.add (m.toString());
@@ -58,6 +65,7 @@ std::shared_ptr<KitModel> KitModel::load (const juce::File& kitPt, juce::String&
        #endif
         k->module = torch::jit::load (kitPt.getFullPathName().toStdString(), k->device);
         k->module.eval();
+        k->hasEncoder = k->module.find_method ("encode").has_value() && k->module.find_method ("render_z").has_value();
     }
     catch (const std::exception& e)
     {
@@ -105,18 +113,66 @@ std::vector<std::vector<float>> KitModel::render (const RenderJob& job)
                 c[i][k] = r.controls[(size_t) k];
         }
 
-        std::vector<torch::jit::IValue> args {
-            (int64_t) juce::jlimit (0, nBank - 1, job.slotA),
-            (int64_t) juce::jlimit (0, nBank - 1, job.slotB),
-            (int64_t) job.mode, (double) job.width,
-            morph, ctl, var, seeds, decay, punch,
-            (int64_t) juce::jlimit (0, nSeeds - 1, job.decodeSeed), (double) job.gateDb };
-
-        auto y = module.get_method ("render") (args).toTensor().to (torch::kCPU).contiguous();
+        torch::Tensor y;
+        const auto tail = std::vector<torch::jit::IValue> { (int64_t) job.mode, (double) job.width,
+                                                            morph, ctl, var, seeds, decay, punch,
+                                                            (int64_t) juce::jlimit (0, nSeeds - 1, job.decodeSeed),
+                                                            (double) job.gateDb };
+        if (hasEncoder)
+        {
+            // latents for A and B: a user hit, or the bank entry
+            auto source = [&] (const UserHitPtr& u, int slot) -> std::pair<torch::Tensor, torch::Tensor>
+            {
+                if (u && accepts (*u))
+                {
+                    auto mu = torch::from_blob (const_cast<float*> (u->mu.data()), { u->D, u->T }).clone();
+                    auto sg = torch::from_blob (const_cast<float*> (u->sigma.data()), { u->D, u->T }).clone();
+                    return { torch::cat ({ mu, sg }, 0), torch::tensor ({ u->peak, u->end }) };
+                }
+                auto e = module.get_method ("entry") ({ (int64_t) juce::jlimit (0, nBank - 1, slot) }).toTuple();
+                return { e->elements()[0].toTensor(), e->elements()[1].toTensor() };
+            };
+            auto a = source (job.userA, job.slotA);
+            auto b = source (job.userB, job.slotB);
+            std::vector<torch::jit::IValue> args { a.first, b.first, a.second, b.second };
+            args.insert (args.end(), tail.begin(), tail.end());
+            y = module.get_method ("render_z") (args).toTensor().to (torch::kCPU).contiguous();
+        }
+        else
+        {
+            std::vector<torch::jit::IValue> args { (int64_t) juce::jlimit (0, nBank - 1, job.slotA),
+                                                   (int64_t) juce::jlimit (0, nBank - 1, job.slotB) };
+            args.insert (args.end(), tail.begin(), tail.end());
+            y = module.get_method ("render") (args).toTensor().to (torch::kCPU).contiguous();
+        }
         const int len = (int) y.size (1);
         const float* data = y.data_ptr<float>();
         for (int i = 0; i < n; ++i)
             out.emplace_back (data + (size_t) i * (size_t) len, data + (size_t) (i + 1) * (size_t) len);
     }
     return out;
+}
+
+std::shared_ptr<UserHit> KitModel::encode (const std::vector<float>& prepared, const juce::String& hitName)
+{
+    if (! hasEncoder)
+        throw std::runtime_error ("this kit has no encoder: re-export it with export_kit.py");
+    std::lock_guard<std::mutex> lock (mutex);
+    torch::NoGradGuard noGrad;
+    auto x = torch::from_blob (const_cast<float*> (prepared.data()), { (int64_t) prepared.size() }).clone();
+    auto out = module.get_method ("encode") ({ x }).toTuple();
+    auto mu = out->elements()[0].toTensor().to (torch::kCPU).contiguous();
+    auto sg = out->elements()[1].toTensor().to (torch::kCPU).contiguous();
+    auto tm = out->elements()[2].toTensor().to (torch::kCPU).contiguous();
+
+    auto h = std::make_shared<UserHit>();
+    h->name = hitName;
+    h->modelId = modelId;
+    h->D = (int) mu.size (0);
+    h->T = (int) mu.size (1);
+    h->mu.assign (mu.data_ptr<float>(), mu.data_ptr<float>() + mu.numel());
+    h->sigma.assign (sg.data_ptr<float>(), sg.data_ptr<float>() + sg.numel());
+    h->peak = tm.data_ptr<float>()[0];
+    h->end = tm.data_ptr<float>()[1];
+    return h;
 }

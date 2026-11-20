@@ -62,10 +62,13 @@ DrumMachineProcessor::DrumMachineProcessor()
     gate = apvts.getRawParameterValue ("gate");
 
     worker.getRecipe = [this] (int pad) { return readRecipe (pad); };
+    worker.onHitEncoded = [this] (std::shared_ptr<UserHit> hit, RenderWorker::EncodeRequest r) { hitEncoded (hit, r); };
     worker.onKitLoaded = [this] (std::shared_ptr<KitModel> kit, bool assign)
     {
         if (assign && kit)
             assignDefaultSlots (*kit);
+        if (kit)
+            reencodeForKit (*kit);
         if (auto* ed = dynamic_cast<DrumMachineEditor*> (getActiveEditor()))
             ed->kitChanged();
     };
@@ -153,6 +156,10 @@ PadRecipe DrumMachineProcessor::readRecipe (int pad) const
     PadRecipe r;
     r.slotA = (int) raw (pad, "slot_a");
     r.slotB = (int) raw (pad, "slot_b");
+    if (r.slotA >= kUserSlotBase)
+        r.userA = getUserHit (r.slotA - kUserSlotBase);
+    if (r.slotB >= kUserSlotBase)
+        r.userB = getUserHit (r.slotB - kUserSlotBase);
     r.mode = (int) raw (pad, "mode");
     r.morph = raw (pad, "morph");
     r.width = raw (pad, "width");
@@ -337,10 +344,108 @@ void DrumMachineProcessor::assignDefaultSlots (const KitModel& kit)
     }
 }
 
+// ── User hits (dropped samples) ──────────────────────────────────────────────
+
+UserHitPtr DrumMachineProcessor::getUserHit (int index) const
+{
+    const juce::ScopedLock sl (userLock);
+    return index >= 0 && index < (int) userHits.size() ? userHits[(size_t) index] : nullptr;
+}
+
+int DrumMachineProcessor::numUserHits() const
+{
+    const juce::ScopedLock sl (userLock);
+    return (int) userHits.size();
+}
+
+void DrumMachineProcessor::importSamples (const juce::Array<juce::File>& files, int pad, bool slotB)
+{
+    // one file: that slot; two or more on slot A: the first two go to A and B
+    for (int i = 0; i < files.size() && i < 2; ++i)
+    {
+        if (i == 1 && slotB)
+            break;
+        worker.requestEncode ({ files[i], pad, slotB || i == 1, -1 });
+    }
+}
+
+void DrumMachineProcessor::hitEncoded (std::shared_ptr<UserHit> hit, const RenderWorker::EncodeRequest& r)
+{
+    int index = r.replaceIndex;
+    {
+        const juce::ScopedLock sl (userLock);
+        if (index >= 0 && index < (int) userHits.size())
+            userHits[(size_t) index] = hit;
+        else
+        {
+            index = -1;                                     // the same file again: reuse its slot
+            for (size_t i = 0; i < userHits.size(); ++i)
+                if (userHits[i]->file == hit->file && userHits[i]->modelId == hit->modelId)
+                    index = (int) i;
+            if (index < 0)
+            {
+                if ((int) userHits.size() >= kMaxUserHits)
+                    return;
+                userHits.push_back (hit);
+                index = (int) userHits.size() - 1;
+            }
+            else
+                userHits[(size_t) index] = hit;
+        }
+    }
+    if (r.pad >= 0)
+        setSlot (r.pad, r.slotB, kUserSlotBase + index);
+    worker.markAllDirty();                                  // any pad may use this slot
+    if (onUserHitsChanged)
+        onUserHitsChanged (r.pad);
+}
+
+void DrumMachineProcessor::reencodeForKit (const KitModel& kit)
+{
+    const juce::ScopedLock sl (userLock);
+    for (size_t i = 0; i < userHits.size(); ++i)
+        if (userHits[i]->modelId != kit.getModelId() && userHits[i]->file.existsAsFile())
+            worker.requestEncode ({ userHits[i]->file, -1, false, (int) i });
+}
+
+static juce::String floatsToBase64 (const std::vector<float>& v)
+{
+    return juce::MemoryBlock (v.data(), v.size() * sizeof (float)).toBase64Encoding();
+}
+
+static std::vector<float> floatsFromBase64 (const juce::String& s)
+{
+    juce::MemoryBlock mb;
+    mb.fromBase64Encoding (s);
+    std::vector<float> v (mb.getSize() / sizeof (float));
+    std::memcpy (v.data(), mb.getData(), v.size() * sizeof (float));
+    return v;
+}
+
 void DrumMachineProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
     auto state = apvts.copyState();
     state.setProperty ("kitPath", worker.getKitFile().getFullPathName(), nullptr);
+    juce::ValueTree hits ("UserHits");
+    {
+        const juce::ScopedLock sl (userLock);
+        for (auto& h : userHits)
+        {
+            juce::ValueTree t ("Hit");
+            t.setProperty ("name", h->name, nullptr);
+            t.setProperty ("file", h->file.getFullPathName(), nullptr);
+            t.setProperty ("model", h->modelId, nullptr);
+            t.setProperty ("D", h->D, nullptr);
+            t.setProperty ("T", h->T, nullptr);
+            t.setProperty ("peak", h->peak, nullptr);
+            t.setProperty ("end", h->end, nullptr);
+            t.setProperty ("mu", floatsToBase64 (h->mu), nullptr);
+            t.setProperty ("sigma", floatsToBase64 (h->sigma), nullptr);
+            hits.appendChild (t, nullptr);
+        }
+    }
+    state.removeChild (state.getChildWithName ("UserHits"), nullptr);
+    state.appendChild (hits, nullptr);
     if (auto xml = state.createXml())
         copyXmlToBinary (*xml, dest);
 }
@@ -352,10 +457,37 @@ void DrumMachineProcessor::setStateInformation (const void* data, int size)
         return;
     auto state = juce::ValueTree::fromXml (*xml);
     worker.cancelDefaultAssignment();                 // the session's slots win
+    {
+        std::vector<UserHitPtr> loaded;
+        auto hits = state.getChildWithName ("UserHits");
+        for (int i = 0; i < hits.getNumChildren(); ++i)
+        {
+            auto t = hits.getChild (i);
+            auto h = std::make_shared<UserHit>();
+            h->name = t.getProperty ("name").toString();
+            h->file = juce::File (t.getProperty ("file").toString());
+            h->modelId = t.getProperty ("model").toString();
+            h->D = (int) t.getProperty ("D");
+            h->T = (int) t.getProperty ("T");
+            h->peak = (float) t.getProperty ("peak");
+            h->end = (float) t.getProperty ("end");
+            h->mu = floatsFromBase64 (t.getProperty ("mu").toString());
+            h->sigma = floatsFromBase64 (t.getProperty ("sigma").toString());
+            if ((int) h->mu.size() == h->D * h->T && h->mu.size() == h->sigma.size())
+                loaded.push_back (h);
+        }
+        const juce::ScopedLock sl (userLock);
+        userHits = std::move (loaded);
+    }
+    state.removeChild (state.getChildWithName ("UserHits"), nullptr);
     apvts.replaceState (state);
     const juce::File kitFile (state.getProperty ("kitPath").toString());
     if (kitFile.existsAsFile() && kitFile != worker.getKitFile())
         worker.requestKit (kitFile, false);
+    else if (auto k = worker.getKit())
+        reencodeForKit (*k);
+    if (onUserHitsChanged)
+        juce::MessageManager::callAsync ([this] { if (onUserHitsChanged) onUserHitsChanged (-1); });
     worker.markAllDirty();
 }
 

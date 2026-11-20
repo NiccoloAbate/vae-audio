@@ -18,6 +18,8 @@ constexpr int kMaxControls = 6;
 constexpr int kNumLayers = 16;
 constexpr int kMaxRR = 4;
 constexpr int kMaxSlots = 512;
+constexpr int kUserSlotBase = 400;      // slots 400+ are hits encoded from dropped samples
+constexpr int kMaxUserHits = kMaxSlots - kUserSlotBase;
 
 // Velocity targets: gain only, morph, the kit's first two controls (Tone, Noise),
 // decay, then its other controls (the unlabelled PCs). The editor shows the kit's
@@ -36,6 +38,7 @@ inline juce::StringArray velTargetNames()
 struct PadRecipe
 {
     int slotA = 0, slotB = 0, mode = 0;
+    UserHitPtr userA, userB;            // resolved user slots (null: bank slot)
     float morph = 0.f, width = 4.f;
     std::array<float, kMaxControls> controls {};
     float variation = 0.f;

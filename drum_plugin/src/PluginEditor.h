@@ -35,13 +35,23 @@ private:
     ldm::LayerSetPtr set;
 };
 
-class DrumMachineEditor : public juce::AudioProcessorEditor, private juce::Timer
+class DrumMachineEditor : public juce::AudioProcessorEditor,
+                          public juce::FileDragAndDropTarget,
+                          private juce::Timer
 {
 public:
     explicit DrumMachineEditor (DrumMachineProcessor&);
     ~DrumMachineEditor() override;
 
     void paint (juce::Graphics&) override;
+    void paintOverChildren (juce::Graphics&) override;
+
+    // Drop samples: on a pad -> its slot A (two files: A and B); on Slot A / Slot B
+    // -> that slot of the selected pad; elsewhere on the right panel -> slot A.
+    bool isInterestedInFileDrag (const juce::StringArray& files) override;
+    void fileDragMove (const juce::StringArray& files, int x, int y) override;
+    void fileDragExit (const juce::StringArray& files) override;
+    void filesDropped (const juce::StringArray& files, int x, int y) override;
     void resized() override;
     void kitChanged();                       // called on the message thread
 
@@ -56,6 +66,9 @@ private:
     void syncSlotCombos();
     juce::String slotName (int index) const;
     juce::Label& labelFor (juce::Component& c, const juce::String& text);
+    struct DropTarget { int pad = -1; bool slotB = false; juce::Rectangle<int> area; };
+    DropTarget dropTargetAt (int x, int y) const;
+    juce::Rectangle<int> dropHighlight;
 
     juce::LookAndFeel_V4 laf;                // declared first: outlives every child
     DrumMachineProcessor& proc;

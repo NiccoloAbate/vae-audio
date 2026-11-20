@@ -250,6 +250,13 @@ DrumMachineEditor::DrumMachineEditor (DrumMachineProcessor& p)
     onSlot (slotA, false);
     onSlot (slotB, true);
 
+    proc.onUserHitsChanged = [this] (int pad)
+    {
+        fillSlotCombos();
+        if (pad >= 0)
+            selectPad (pad);
+    };
+
     setSize (1120, 640);
     kitChanged();
     startTimerHz (30);
@@ -257,6 +264,7 @@ DrumMachineEditor::DrumMachineEditor (DrumMachineProcessor& p)
 
 DrumMachineEditor::~DrumMachineEditor()
 {
+    proc.onUserHitsChanged = nullptr;
     stopTimer();
     setLookAndFeel (nullptr);
 }
@@ -285,6 +293,11 @@ void DrumMachineEditor::kitChanged()
 
 juce::String DrumMachineEditor::slotName (int index) const
 {
+    if (index >= kUserSlotBase)
+    {
+        auto h = proc.getUserHit (index - kUserSlotBase);
+        return h ? "* " + h->name : "-";
+    }
     if (! kit || index < 0 || index >= (int) kit->entries().size())
         return "-";
     return kit->entries()[(size_t) index].name;
@@ -297,7 +310,14 @@ void DrumMachineEditor::fillSlotCombos()
         cb->clear (juce::dontSendNotification);
         if (! kit)
             continue;
-        // grouped by drum type, the selected pad's type first
+        // your dropped hits first, then the bank grouped by drum type, the pad's type first
+        if (const int nUser = proc.numUserHits(); nUser > 0)
+        {
+            cb->addSectionHeading ("your hits (drop samples here)");
+            for (int i = 0; i < nUser; ++i)
+                if (auto h = proc.getUserHit (i))
+                    cb->addItem ("* " + h->name, kUserSlotBase + i + 1);
+        }
         juce::StringArray types;
         types.add (padDefaults()[(size_t) selected].type);
         for (auto& e : kit->entries())
@@ -425,6 +445,76 @@ void DrumMachineEditor::timerCallback()
     if (proc.worker.getKit() != kit)
         kitChanged();
     syncSlotCombos();
+}
+
+DrumMachineEditor::DropTarget DrumMachineEditor::dropTargetAt (int x, int y) const
+{
+    const juce::Point<int> pt (x, y);
+    for (auto& pb : pads)
+        if (pb.getBounds().contains (pt))
+            return { pb.pad, false, pb.getBounds() };
+    if (slotA.getBounds().expanded (4).contains (pt))
+        return { selected, false, slotA.getBounds() };
+    if (slotB.getBounds().expanded (4).contains (pt))
+        return { selected, true, slotB.getBounds() };
+    if (x > 494 && y > 60)
+        return { selected, false, slotA.getBounds() };
+    return {};
+}
+
+bool DrumMachineEditor::isInterestedInFileDrag (const juce::StringArray& files)
+{
+    for (auto& f : files)
+        if (isAudioFile (juce::File (f)))
+            return true;
+    return false;
+}
+
+void DrumMachineEditor::fileDragMove (const juce::StringArray&, int x, int y)
+{
+    const auto t = dropTargetAt (x, y);
+    if (t.area != dropHighlight)
+    {
+        dropHighlight = t.area;
+        repaint();
+    }
+}
+
+void DrumMachineEditor::fileDragExit (const juce::StringArray&)
+{
+    dropHighlight = {};
+    repaint();
+}
+
+void DrumMachineEditor::filesDropped (const juce::StringArray& files, int x, int y)
+{
+    dropHighlight = {};
+    repaint();
+    const auto t = dropTargetAt (x, y);
+    if (t.pad < 0)
+        return;
+    if (kit && ! kit->canEncode())
+    {
+        statusLabel.setText ("this kit has no encoder: re-export it with export_kit.py", juce::dontSendNotification);
+        return;
+    }
+    juce::Array<juce::File> audio;
+    for (auto& f : files)
+        if (isAudioFile (juce::File (f)))
+            audio.add (juce::File (f));
+    if (audio.isEmpty())
+        return;
+    selectPad (t.pad);
+    proc.importSamples (audio, t.pad, t.slotB);
+}
+
+void DrumMachineEditor::paintOverChildren (juce::Graphics& g)
+{
+    if (! dropHighlight.isEmpty())
+    {
+        g.setColour (accent);
+        g.drawRoundedRectangle (dropHighlight.toFloat().expanded (3.f), 6.f, 2.5f);
+    }
 }
 
 void DrumMachineEditor::paint (juce::Graphics& g)

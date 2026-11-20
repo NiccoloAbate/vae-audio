@@ -56,6 +56,14 @@ public:
     void decayFlash();
     void setSlot (int pad, bool b, int index);
 
+    // Hits encoded from dropped samples: slots kUserSlotBase + index, saved with the
+    // session (latents, so no file is needed to reopen it; the file path is kept to
+    // re-encode when a kit with a different model loads).
+    void importSamples (const juce::Array<juce::File>& files, int pad, bool slotB);
+    UserHitPtr getUserHit (int index) const;
+    int numUserHits() const;
+    std::function<void (int pad)> onUserHitsChanged;          // editor refresh (message thread)
+
     juce::AudioProcessorValueTreeState apvts;
     RenderWorker worker;
 
@@ -66,6 +74,11 @@ private:
     PadPlay readPlay (int pad) const;
     void trigger (int pad, float velocity);
     void assignDefaultSlots (const KitModel& kit);
+    void hitEncoded (std::shared_ptr<UserHit> hit, const RenderWorker::EncodeRequest& r);
+    void reencodeForKit (const KitModel& kit);
+
+    mutable juce::CriticalSection userLock;
+    std::vector<UserHitPtr> userHits;
     float raw (int pad, const char* p) const;
 
     Sampler sampler;
