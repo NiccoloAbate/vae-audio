@@ -24,6 +24,7 @@ public:
     void noteOn (int pad, float velocity, const ldm::LayerSetPtr& set, const PadPlay& pp);
     void render (juce::AudioBuffer<float>& out, int start, int num);
     void allOff();
+    void fadePad (int pad);                                 // e.g. on mute
 
 private:
     struct Voice

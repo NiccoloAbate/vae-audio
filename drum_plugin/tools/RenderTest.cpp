@@ -30,7 +30,7 @@ int main (int argc, char* argv[])
     r.slotB = (r.slotA + 1) % (int) kit->entries().size();
     r.variation = 0.1f;
     r.roundRobin = 2;
-    r.velTarget = argc > 4 ? juce::String (argv[4]).getIntValue() : ldm::VelControl1;
+    r.velTarget = argc > 4 ? juce::String (argv[4]).getIntValue() : ldm::velTargetForControl (0);
     r.velDepth = 0.5f;
     r.morph = r.velTarget == ldm::VelMorph ? 1.f : 0.f;
 

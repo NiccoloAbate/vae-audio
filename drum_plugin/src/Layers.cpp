@@ -5,7 +5,7 @@ namespace ldm
 RenderJob makeJob (const PadRecipe& r, const KitModel& kit, int& numLayers, int& numRR)
 {
     const int K = juce::jmin (kit.numControls(), kMaxControls);
-    const int velControl = (r.velTarget >= VelControl1 && r.velTarget < VelDecay) ? r.velTarget - VelControl1 : -1;
+    const int velControl = controlForVelTarget (r.velTarget);
     const bool layered = r.velTarget != VelGainOnly && r.velDepth > 0.f && velControl < K;
     numLayers = layered ? kNumLayers : 1;
     numRR = r.variation > 0.f ? juce::jlimit (1, kMaxRR, r.roundRobin) : 1;

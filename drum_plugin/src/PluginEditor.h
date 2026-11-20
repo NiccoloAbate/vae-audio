@@ -8,6 +8,8 @@ class PadButton : public juce::Component
 {
 public:
     std::function<void (int pad, float velocity)> onPress;
+    std::function<void (int pad, bool solo)> onToggle;      // the M / S buttons
+    bool muted = false, soloed = false, dimmed = false;
     int pad = 0;
     juce::String title, sub, note;
     juce::Colour colour;
@@ -16,6 +18,9 @@ public:
 
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
+
+private:
+    juce::Rectangle<float> toggleBox (bool solo) const;
 };
 
 // The selected pad's rendered hit: loudest layer, softest layer faint behind it.

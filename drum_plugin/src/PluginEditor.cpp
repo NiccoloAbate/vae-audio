@@ -29,8 +29,15 @@ void styleSlider (juce::Slider& s)
 
 // ── PadButton ────────────────────────────────────────────────────────────────
 
+juce::Rectangle<float> PadButton::toggleBox (bool solo) const
+{
+    return { 9.f + (solo ? 22.f : 0.f), (float) getHeight() - 25.f, 19.f, 16.f };
+}
+
 void PadButton::paint (juce::Graphics& g)
 {
+    if (dimmed)
+        g.beginTransparencyLayer (0.45f);
     auto r = getLocalBounds().toFloat().reduced (2.f);
     g.setColour (panel.brighter (0.05f));
     g.fillRoundedRectangle (r, 8.f);
@@ -47,10 +54,37 @@ void PadButton::paint (juce::Graphics& g)
     g.setFont (juce::FontOptions (11.f));
     g.drawFittedText (sub, t.removeFromTop (30.f).toNearestInt(), juce::Justification::topLeft, 2);
     g.drawText (note, t.removeFromBottom (14.f), juce::Justification::bottomRight);
+    if (dimmed)
+        g.endTransparencyLayer();
+
+    // M / S toggles, bottom left: filled when on
+    for (bool solo : { false, true })
+    {
+        const bool on = solo ? soloed : muted;
+        const auto box = toggleBox (solo);
+        const auto c = solo ? juce::Colour (0xffe6c84f) : juce::Colour (0xffe0604f);
+        if (on)
+        {
+            g.setColour (c);
+            g.fillRoundedRectangle (box, 3.f);
+        }
+        g.setColour (on ? c : dim.withAlpha (0.6f));
+        g.drawRoundedRectangle (box, 3.f, 1.f);
+        g.setColour (on ? bg : dim);
+        g.setFont (juce::FontOptions (11.f, juce::Font::bold));
+        g.drawText (solo ? "S" : "M", box, juce::Justification::centred);
+    }
 }
 
 void PadButton::mouseDown (const juce::MouseEvent& e)
 {
+    for (bool solo : { false, true })
+        if (toggleBox (solo).expanded (2.f).contains (e.position))
+        {
+            if (onToggle)
+                onToggle (pad, solo);
+            return;
+        }
     if (onPress)
         onPress (pad, juce::jlimit (0.05f, 1.f, 1.f - (float) e.y / (float) juce::jmax (1, getHeight())));
 }
@@ -158,6 +192,7 @@ DrumMachineEditor::DrumMachineEditor (DrumMachineProcessor& p)
             selectPad (pad);
             proc.audition (pad, vel);
         };
+        pb.onToggle = [this] (int pad, bool solo) { proc.toggle (pad, solo ? "solo" : "mute"); };
         addAndMakeVisible (pb);
     }
 
@@ -314,7 +349,7 @@ void DrumMachineEditor::selectPad (int pad)
     velTarget.clear (juce::dontSendNotification);
     auto vt = velTargetNames();
     for (int k = 0; k < kMaxControls; ++k)
-        vt.set (VelControl1 + k, kit && k < kit->numControls() ? kit->controlNames()[k]
+        vt.set (velTargetForControl (k), kit && k < kit->numControls() ? kit->controlNames()[k]
                                                                : "(no control " + juce::String (k + 1) + ")");
     velTarget.addItemList (vt, 1);
     choke.clear (juce::dontSendNotification);
@@ -355,8 +390,21 @@ void DrumMachineEditor::selectPad (int pad)
 void DrumMachineEditor::timerCallback()
 {
     proc.decayFlash();
+    bool anySolo = false;
+    for (int p = 0; p < kNumPads; ++p)
+        anySolo = anySolo || proc.apvts.getRawParameterValue (pid (p, "solo"))->load() > 0.5f;
     for (auto& pb : pads)
     {
+        const bool m = proc.apvts.getRawParameterValue (pid (pb.pad, "mute"))->load() > 0.5f;
+        const bool s = proc.apvts.getRawParameterValue (pid (pb.pad, "solo"))->load() > 0.5f;
+        const bool d = m || (anySolo && ! s);
+        if (m != pb.muted || s != pb.soloed || d != pb.dimmed)
+        {
+            pb.muted = m;
+            pb.soloed = s;
+            pb.dimmed = d;
+            pb.repaint();
+        }
         const float f = proc.getFlash (pb.pad);
         const int a = (int) proc.apvts.getRawParameterValue (pid (pb.pad, "slot_a"))->load();
         const int n = (int) proc.apvts.getRawParameterValue (pid (pb.pad, "note"))->load();

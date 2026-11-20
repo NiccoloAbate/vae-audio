@@ -19,15 +19,17 @@ constexpr int kNumLayers = 16;
 constexpr int kMaxRR = 4;
 constexpr int kMaxSlots = 512;
 
-// Velocity targets: gain only, morph, any of the kit's controls (named from the kit
-// in the editor, e.g. Tone / Noise / PC1-4), decay.
-enum VelTarget { VelGainOnly = 0, VelMorph, VelControl1, VelDecay = VelControl1 + 6 };
+// Velocity targets: gain only, morph, the kit's first two controls (Tone, Noise),
+// decay, then its other controls (the unlabelled PCs). The editor shows the kit's
+// control names. Indices 0-4 are unchanged from the first version (saved sessions).
+enum VelTarget { VelGainOnly = 0, VelMorph = 1, VelDecay = 4 };
+inline int velTargetForControl (int k) { return k < 2 ? 2 + k : 3 + k; }
+inline int controlForVelTarget (int t) { return (t == 2 || t == 3) ? t - 2 : (t >= 5 ? t - 3 : -1); }
 inline juce::StringArray velTargetNames()
 {
-    juce::StringArray s { "Gain only", "Morph A-B" };
-    for (int k = 0; k < 6; ++k)
+    juce::StringArray s { "Gain only", "Morph A-B", "Control 1", "Control 2", "Decay" };
+    for (int k = 2; k < 6; ++k)
         s.add ("Control " + juce::String (k + 1));
-    s.add ("Decay");
     return s;
 }
 

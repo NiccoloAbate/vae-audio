@@ -15,6 +15,13 @@ void Sampler::allOff()
     }
 }
 
+void Sampler::fadePad (int pad)
+{
+    for (auto& v : voices)
+        if (v.active && v.pad == pad)
+            startFade (v);
+}
+
 void Sampler::startFade (Voice& v)
 {
     if (v.active && v.fade < 0)

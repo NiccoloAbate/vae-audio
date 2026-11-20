@@ -54,7 +54,9 @@ DrumMachineProcessor::DrumMachineProcessor()
         play[(size_t) p] = { apvts.getRawParameterValue (pid (p, "note")), apvts.getRawParameterValue (pid (p, "gain")),
                              apvts.getRawParameterValue (pid (p, "pan")), apvts.getRawParameterValue (pid (p, "vel_gain")),
                              apvts.getRawParameterValue (pid (p, "choke")), apvts.getRawParameterValue (pid (p, "self_choke")),
-                             apvts.getRawParameterValue (pid (p, "var_order")) };
+                             apvts.getRawParameterValue (pid (p, "var_order")),
+                             apvts.getRawParameterValue (pid (p, "mute")), apvts.getRawParameterValue (pid (p, "solo")) };
+    audible.fill (true);
     masterGain = apvts.getRawParameterValue ("master");
     decodeSeed = apvts.getRawParameterValue ("decode_seed");
     gate = apvts.getRawParameterValue ("gate");
@@ -124,13 +126,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrumMachineProcessor::create
         addC ("var_order", "Variation order", { "Random", "Cycle" }, 0);
         addF ("decay", "Decay", -2.f, 2.f, 0.f);
         addF ("punch", "Punch", -0.75f, 4.f, 0.f, 0.25f);
-        addC ("vel_target", "Velocity target", velTargetNames(), VelControl1);
+        addC ("vel_target", "Velocity target", velTargetNames(), velTargetForControl (0));
         addF ("vel_depth", "Velocity depth", 0.f, 1.f, 0.3f);
         addF ("vel_gain", "Velocity to gain", 0.f, 1.f, 0.7f);
         addF ("gain", "Gain (dB)", -48.f, 12.f, 0.f);
         addF ("pan", "Pan", -1.f, 1.f, 0.f);
         addC ("choke", "Choke group", chokes, d.choke);
         layout.add (std::make_unique<AudioParameterBool> (ParameterID { pid (p, "self_choke"), 1 }, n + "Self-choke", false));
+        layout.add (std::make_unique<AudioParameterBool> (ParameterID { pid (p, "mute"), 1 }, n + "Mute", false));
+        layout.add (std::make_unique<AudioParameterBool> (ParameterID { pid (p, "solo"), 1 }, n + "Solo", false));
     }
     layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "master", 1 }, "Master (dB)",
                                                        NormalisableRange<float> (-48.f, 12.f), 0.f, twoDp));
@@ -236,6 +240,20 @@ void DrumMachineProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
     if (isNonRealtime() && worker.isBusy())
         worker.waitUntilIdle (30000);
 
+    // Mute / solo: muted pads (or pads left out of a solo) ignore MIDI, and their
+    // ringing hits fade out when they become inaudible. Pad clicks always play.
+    bool anySolo = false;
+    for (auto& q : play)
+        anySolo = anySolo || q.solo->load() > 0.5f;
+    for (int p = 0; p < kNumPads; ++p)
+    {
+        const auto& q = play[(size_t) p];
+        const bool a = q.mute->load() < 0.5f && (! anySolo || q.solo->load() > 0.5f);
+        if (audible[(size_t) p] && ! a)
+            sampler.fadePad (p);
+        audible[(size_t) p] = a;
+    }
+
     {
         const auto scope = uiFifo.read (uiFifo.getNumReady());
         for (int i = 0; i < scope.blockSize1; ++i)
@@ -254,7 +272,7 @@ void DrumMachineProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
             sampler.render (buffer, pos, t - pos);
             pos = t;
             for (int p = 0; p < kNumPads; ++p)
-                if ((int) play[(size_t) p].note->load() == msg.getNoteNumber())
+                if (audible[(size_t) p] && (int) play[(size_t) p].note->load() == msg.getNoteNumber())
                     trigger (p, msg.getFloatVelocity());
         }
         else if (msg.isAllNotesOff() || msg.isAllSoundOff())
@@ -266,6 +284,16 @@ void DrumMachineProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
     }
     sampler.render (buffer, pos, buffer.getNumSamples() - pos);
     buffer.applyGain (juce::Decibels::decibelsToGain (masterGain->load(), -48.f));
+}
+
+void DrumMachineProcessor::toggle (int pad, const char* param)
+{
+    if (auto* p = apvts.getParameter (pid (pad, param)))
+    {
+        p->beginChangeGesture();
+        p->setValueNotifyingHost (p->getValue() > 0.5f ? 0.f : 1.f);
+        p->endChangeGesture();
+    }
 }
 
 void DrumMachineProcessor::setSlot (int pad, bool b, int index)

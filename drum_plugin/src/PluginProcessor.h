@@ -52,6 +52,7 @@ public:
     void loadKit (const juce::File& kitPt) { worker.requestKit (kitPt, true); }
     void audition (int pad, float velocity);
     float getFlash (int pad) const { return flash[(size_t) pad].load(); }
+    void toggle (int pad, const char* param);               // mute / solo buttons
     void decayFlash();
     void setSlot (int pad, bool b, int index);
 
@@ -75,8 +76,9 @@ private:
     std::array<std::pair<int, float>, 64> uiNotes;
 
     // Playback parameters, cached so the audio thread does no lookups
-    struct PlayParams { std::atomic<float> *note, *gain, *pan, *velGain, *choke, *selfChoke, *varOrder; };
+    struct PlayParams { std::atomic<float> *note, *gain, *pan, *velGain, *choke, *selfChoke, *varOrder, *mute, *solo; };
     std::array<PlayParams, ldm::kNumPads> play {};
+    std::array<bool, ldm::kNumPads> audible;                // mute / solo, audio thread
 
     std::atomic<float>* masterGain = nullptr;
     std::atomic<float>* decodeSeed = nullptr;
