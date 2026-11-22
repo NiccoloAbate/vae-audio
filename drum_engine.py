@@ -414,6 +414,8 @@ class DrumEngine:
         """Bank hits a -> b by amount t. blend / slerp: frame by frame as stored;
         aligned / tail / crossover: re-timed first (morph_aligned)."""
         za, zb = self.z(a_idx), self.z(b_idx)
+        if self.T_lat == 1 and mode not in ('blend', 'slerp'):   # one-vector models: no timeline
+            mode = 'blend'
         t_ = torch.tensor(float(t))
         if mode == 'slerp':                              # on mu; sigma (if any) blended
             D = self.latent_dim
@@ -431,7 +433,7 @@ class DrumEngine:
         frames past the hit's loudest frame, and resample the frames after it by
         `factor` (2 = tail twice as long); a compressed tail fades into the bank's
         silence latent past the window end. Costs one extra decode to find the peak."""
-        if factor == 1:
+        if factor == 1 or self.T_lat == 1:                     # nothing to re-time in one vector
             return z
         self._bank_timing()
         return stretch_tail(z[None], self._peak(z) + head, factor, pad=self.z_silence)[0]
@@ -439,7 +441,7 @@ class DrumEngine:
     def punch(self, z, frames):
         """Hold the loudest part of the hit `frames` latent frames longer (11.6 ms each
         at 44.1 kHz; < 0 shortens it); the rest of the hit follows later."""
-        if frames == 0:
+        if frames == 0 or self.T_lat == 1:
             return z
         self._bank_timing()
         return hold_peak(z[None], self._peak(z), frames, pad=self.z_silence)[0]

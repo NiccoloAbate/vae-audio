@@ -375,7 +375,7 @@ void DrumMachineEditor::selectPad (int pad)
     choke.clear (juce::dontSendNotification);
     choke.addItemList ({ "None", "Group 1", "Group 2", "Group 3", "Group 4" }, 1);
     varOrder.clear (juce::dontSendNotification);
-    varOrder.addItemList ({ "Random", "Cycle" }, 1);
+    varOrder.addItemList ({ "Random", "Cycle", "Random, no repeat" }, 1);
 
     auto& ap = proc.apvts;
     auto sa = [&] (const char* id, juce::Slider& s) { sliderAtt.push_back (std::make_unique<SA> (ap, pid (pad, id), s)); };

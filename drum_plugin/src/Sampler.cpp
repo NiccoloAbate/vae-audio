@@ -62,7 +62,9 @@ void Sampler::noteOn (int pad, float velocity, const ldm::LayerSetPtr& set, cons
     int& last = lastVariation[(size_t) pad];
     last = juce::jlimit (0, juce::jmax (0, n - 1), last);   // the set may have fewer variations now
     int rr = 0;
-    if (n > 1 && pp.randomOrder)
+    if (n > 1 && pp.order == 0)
+        rr = rng.nextInt (n);                               // any variation, repeats allowed
+    else if (n > 1 && pp.order == 2)
     {
         rr = rng.nextInt (n - 1);                           // any variation but the last one
         if (rr >= last)

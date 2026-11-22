@@ -126,7 +126,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrumMachineProcessor::create
         addF ("var", "Variation", 0.f, 2.f, 0.1f);
         addI ("seed", "Variation seed", 0, 63, (p * 7) % 64);
         addI ("rr", "Variations", 1, kMaxRR, 3);
-        addC ("var_order", "Variation order", { "Random", "Cycle" }, 0);
+        addC ("var_order", "Variation order", { "Random", "Cycle", "Random, no repeat" }, 0);
         addF ("decay", "Decay", -2.f, 2.f, 0.f);
         addF ("punch", "Punch", -0.75f, 4.f, 0.f, 0.25f);
         addC ("vel_target", "Velocity target", velTargetNames(), velTargetForControl (0));
@@ -186,7 +186,7 @@ PadPlay DrumMachineProcessor::readPlay (int pad) const
     pp.velToGain = q.velGain->load();
     pp.chokeGroup = (int) q.choke->load();
     pp.selfChoke = q.selfChoke->load() > 0.5f;
-    pp.randomOrder = q.varOrder->load() < 0.5f;
+    pp.order = (int) q.varOrder->load();
     return pp;
 }
 

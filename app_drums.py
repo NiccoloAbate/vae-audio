@@ -113,7 +113,8 @@ def build_app(engine):
         orig_player = gr.HTML('', padding=False)
         morph = gr.Slider(0, 1, value=0.0, step=0.01, label='Morph  A → B   (velocity axis)')
         with gr.Row():
-            mode = gr.Dropdown(list(MODES), value='Blend', label='Morph mode',
+            one_vec = engine.T_lat == 1          # global-latent model: no frame sequence to re-time
+            mode = gr.Dropdown(list(MODES)[:2] if one_vec else list(MODES), value='Blend', label='Morph mode',
                                info='Blend: frame by frame as stored. Shape-aligned: peaks and '
                                     'tail lengths matched first. Tail only: A\'s attack, tail '
                                     'morphed. Crossover: A turns into B, the morph sets when.')
@@ -136,10 +137,12 @@ def build_app(engine):
             gated = gr.Checkbox(value=engine.gate_db is not None,
                                 label=f'Noise gate ({engine.gate_db_default:g} dB below the peak)')
         with gr.Row():
-            decay = gr.Slider(-2, 2, value=0.0, step=0.1, label='Decay (stretch): tail length x 2^s',
+            decay = gr.Slider(-2, 2, value=0.0, step=0.1, interactive=not one_vec,
+                              label='Decay (stretch): tail length x 2^s' + (' (n/a: one-vector latent)' if one_vec else ''),
                               info='the latent after the peak is resampled in time; -2 = x0.25, '
                                    '+2 = x4 (long hits stop at the 1.5 s window)')
-            punch = gr.Slider(-0.75, 4, value=0.0, step=0.25, label='Punch: hold the peak (frames)',
+            punch = gr.Slider(-0.75, 4, value=0.0, step=0.25, interactive=not one_vec,
+                              label='Punch: hold the peak (frames)' + (' (n/a: one-vector latent)' if one_vec else ''),
                               info='the loudest frame is held this many frames longer '
                                    '(11.6 ms each); < 0 shortens it')
         knob_sliders = []

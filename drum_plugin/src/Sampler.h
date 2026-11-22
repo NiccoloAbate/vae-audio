@@ -12,7 +12,7 @@ struct PadPlay
     float gain = 1.f, pan = 0.f, velToGain = 0.7f;
     int chokeGroup = 0;
     bool selfChoke = false;
-    bool randomOrder = true;        // variations: random (never the same twice in a row) or cycle
+    int order = 0;                  // variations: 0 random, 1 cycle, 2 random but never twice in a row
 };
 
 class Sampler

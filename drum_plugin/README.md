@@ -51,7 +51,7 @@ Per pad:
 - **Slot A / B, Morph, Morph mode, Xfade width**: the bank hits and the morph between them (as in the app).
 - **Controls**: the kit's latent directions (Tone, Noise, PC1–4 on v3_B1), applied on the sounding frames.
 - **Decay, Punch**: time-based operations on the latent sequence.
-- **Variation, Var. seed, Variations, Var. order**: a random constant offset. With Variations > 1, that many seeds are rendered (seed, seed + 1, ...), and each hit picks one, either at random (never the same twice in a row) or in turn (Cycle).
+- **Variation, Var. seed, Variations, Var. order**: a random constant offset. With Variations > 1, that many seeds are rendered (seed, seed + 1, ...), and each hit picks one: at random (Random), in turn (Cycle), or at random but never the same twice in a row (Random, no repeat; with 2 variations that alternates).
 - **Velocity -> / Vel. depth / Vel. -> gain**: see *Velocity* below.
 - **Gain, Pan, Choke, Self-choke**: playback only, with no re-render. The hats share choke group 1.
 

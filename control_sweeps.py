@@ -116,6 +116,18 @@ def desc_array(waves, sr):
 # model helpers
 # ---------------------------------------------------------------------------
 
+SAMPLE_Z = None     # --sample_z SEED: decode mu + sigma * eps (as in training), eps fixed per hit
+
+
+def _z(z, sd, start):
+    """z + sd * eps for the batch starting at hit `start` (same eps for a hit in every
+    call, so a sweep only changes what the direction changes); z itself without --sample_z."""
+    if SAMPLE_Z is None or sd is None:
+        return z
+    g = torch.Generator().manual_seed(SAMPLE_Z * 1000003 + start)
+    return z + sd * torch.randn(z.shape, generator=g)
+
+
 def encode_decode(model, ds, idxs, device, bs=16):
     """Posterior means and log-variances (N, D, T), decoded recon (N, L), on CPU."""
     mus, lvs, ys = [], [], []
@@ -124,14 +136,15 @@ def encode_decode(model, ds, idxs, device, bs=16):
             x = torch.stack([ds[i][2] for i in idxs[s:s + bs]]).to(device)
             mu, lv, _ = model.encode(x)
             mus.append(mu.cpu()); lvs.append(lv.cpu())
-            ys.append(model.decode(mu).squeeze(1).cpu())
+            ys.append(model.decode(_z(mu.cpu(), (0.5 * lv.cpu()).exp(), s).to(device)).squeeze(1).cpu())
     return torch.cat(mus), torch.cat(lvs), torch.cat(ys)
 
 
-def decode(model, z, device, bs=16):
+def decode(model, z, device, sd=None, bs=16):
+    """sd: posterior std per hit (N, D, T), used with --sample_z."""
     with torch.no_grad():
-        return torch.cat([model.decode(z[s:s + bs].to(device)).squeeze(1).cpu()
-                          for s in range(0, len(z), bs)])
+        return torch.cat([model.decode(_z(z[s:s + bs], None if sd is None else sd[s:s + bs], s).to(device))
+                          .squeeze(1).cpu() for s in range(0, len(z), bs)])
 
 
 def pool(mu, mask):
@@ -209,6 +222,8 @@ def sweep_metrics(D, grid, j):
 
 
 def main(args):
+    global SAMPLE_Z
+    SAMPLE_Z = args.sample_z
     device = torch.device(args.device) if args.device else get_device()
     model, cfg, epoch = load_checkpoint(args.resume)
     model.to(device)
@@ -245,7 +260,8 @@ def main(args):
           ', '.join(f'{k}={m:.2f}±{s:.2f}' for k, m, s in zip(KNOBS, mean, std)))
 
     print('Encoding sweep set…')
-    mu_t, _, y_t = encode_decode(model, test_ds, list(range(len(test_ds))), device)
+    mu_t, lv_t, y_t = encode_decode(model, test_ds, list(range(len(test_ds))), device)
+    sd_t = (0.5 * lv_t).exp()
     grid = args.grid
     i0 = grid.index(0.0)
 
@@ -270,7 +286,7 @@ def main(args):
                     if s == 0.0:
                         Ds.append(D0); continue
                     z = mu_t + s * v[None, :, None] * m_t[:, None, :]
-                    Ds.append((desc_array(decode(model, z, device).numpy(), sr) - mean) / std)
+                    Ds.append((desc_array(decode(model, z, device, sd_t).numpy(), sr) - mean) / std)
                 Ds = np.stack(Ds)                                  # (S, N, K)
                 met = sweep_metrics(Ds, grid, j)
                 summary[f'{mode}/{k}/{kind}'] = {**met, 'r2_cv': dirs[k]['r2_cv'][kind],
@@ -292,9 +308,9 @@ def main(args):
                     'r2_cv': dirs[k]['r2_cv'][kind], 'analogue': ANALOGUE[k]}
                 if kind != 'single':
                     if args.n_audio and mode == 'active':
-                        write_strips(model, mu_t, m_t, v, grid, test_rel, test_ds,
+                        write_strips(model, mu_t, m_t, v, grid, test_rel, test_ds, 
                                      os.path.join(out_dir, 'audio', kind), k, sr, device,
-                                     args.n_audio)
+                                     args.n_audio, sd=sd_t)
         fig.suptitle(f'{args.name}: knob sweeps (offset on {mode} frames)', fontsize=10)
         fig.tight_layout()
         fig.savefig(os.path.join(out_dir, f'sweeps_{mode}.png'), dpi=110)
@@ -302,7 +318,7 @@ def main(args):
 
     if args.pc_dirs:
         sweep_pcs(args, model, device, grid, i0, mean, std, sr, T, keep, mu_fit, y_fit, mu_t, y_t,
-                  test_rel, test_ds, out_dir, summary, directions)
+                  test_rel, test_ds, out_dir, summary, directions, sd_t)
 
     lines = [f'{"mode/knob/direction":<30}{"cv_R2":>7}{"slope":>7}{"r2":>6}{"monot":>7}'
              f'{"leak":>6}  safe_range']
@@ -323,15 +339,16 @@ def main(args):
 
 
 def sweep_pcs(args, model, device, grid, i0, mean, std, sr, T, keep, mu_fit, y_fit, mu_t, y_t,
-              test_rel, test_ds, out_dir, summary, directions):
+              test_rel, test_ds, out_dir, summary, directions, sd_t=None):
     """Sweep the top --pc_dirs principal axes (fit set, and --bank if given) on
     the sweep hits; adds 'active/pc<k>/<source>' entries (see docstring 3)."""
     m_fit, m_t = frame_activity(y_fit, T), frame_activity(y_t, T)
     D0 = (desc_array(y_t.numpy(), sr) - mean) / std
     sources = {'fit': pc_directions(pool(mu_fit, m_fit)[keep].numpy(), args.pc_dirs)}
     if args.bank:
-        Zb = torch.load(args.bank, map_location='cpu', weights_only=False)['latents']
-        mb = frame_activity(decode(model, Zb, device), T)
+        bank = torch.load(args.bank, map_location='cpu', weights_only=False)
+        Zb = bank['latents']
+        mb = frame_activity(decode(model, Zb, device, bank.get('sigmas')), T)
         sources['bank'] = pc_directions(pool(Zb, mb).numpy(), args.pc_dirs)
         cos = np.abs(sources['bank'][0] @ sources['fit'][0].T)
         print('|cos| bank PCs (rows) vs fit PCs (cols):')
@@ -345,7 +362,7 @@ def sweep_pcs(args, model, device, grid, i0, mean, std, sr, T, keep, mu_fit, y_f
             if s == 0.0:
                 Ds.append(D0); continue
             z = mu_t + s * v[None, :, None] * m_t[:, None, :]
-            Ds.append((desc_array(decode(model, z, device).numpy(), sr) - mean) / std)
+            Ds.append((desc_array(decode(model, z, device, sd_t).numpy(), sr) - mean) / std)
         return np.stack(Ds)
 
     fig, axes = plt.subplots(len(sources), args.pc_dirs, figsize=(3.2 * args.pc_dirs, 3.2 * len(sources)),
@@ -377,16 +394,16 @@ def sweep_pcs(args, model, device, grid, i0, mean, std, sr, T, keep, mu_fit, y_f
             if k == 0: ax.set_ylabel(f'{src}: mean change (std units)')
             if r == 0 and k == 0: ax.legend(fontsize=7)
             if args.n_audio:
-                write_strips(model, mu_t, m_t, v, grid, test_rel, test_ds,
+                write_strips(model, mu_t, m_t, v, grid, test_rel, test_ds, 
                              os.path.join(out_dir, 'audio', 'pcs'), f'pc{k + 1}{src}', sr, device,
-                             args.n_audio)
+                             args.n_audio, sd=sd_t)
     fig.suptitle(f'{args.name}: unlabelled PC directions (offset on active frames)', fontsize=10)
     fig.tight_layout()
     fig.savefig(os.path.join(out_dir, 'sweeps_pcs.png'), dpi=110)
     plt.close(fig)
 
 
-def write_strips(model, mu, mask, v, grid, rel, ds, out_dir, knob, sr, device, n):
+def write_strips(model, mu, mask, v, grid, rel, ds, out_dir, knob, sr, device, n, sd=None):
     """For the first n hits (one per type where possible): the hit swept over
     the grid, low to high, each step trimmed at -60 dB, 0.3 s gaps."""
     os.makedirs(out_dir, exist_ok=True)
@@ -399,7 +416,8 @@ def write_strips(model, mu, mask, v, grid, rel, ds, out_dir, knob, sr, device, n
     gap = np.zeros(int(0.3 * sr), dtype=np.float32)
     for i in picks:
         z = torch.stack([mu[i] + s * v[:, None] * mask[i][None, :] for s in grid])
-        ys = decode(model, z, device).numpy()
+        sdi = None if sd is None else sd[i][None].expand_as(z)
+        ys = decode(model, z, device, sdi).numpy()
         parts = []
         for y in ys:
             nz = np.nonzero(np.abs(y) > np.abs(y).max() * 1e-3)[0]
@@ -435,6 +453,8 @@ if __name__ == '__main__':
                    help="skip the descriptor knobs; add the PC sweeps to out_dir's existing outputs")
     p.add_argument('-d', '--device')
     p.add_argument('--seed', type=int, default=0)
+    p.add_argument('--sample_z', type=int, default=None, metavar='SEED',
+                   help='decode mu + sigma * eps (fixed eps per hit) instead of mu')
     args = p.parse_args()
     assert 0.0 in args.grid, '--grid must include 0'
     main(args)

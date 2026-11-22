@@ -34,6 +34,16 @@ a complex-STFT discriminator to v3's waveform one; v5bal is the balancer alone:
     python make_v2_configs.py --data_dir ... --tag v5bal --amp_out --arms B --seeds 1 --trainer_json \
         '{"balance": {"adv": 0.1, "fm": 0.1}, "balance_mode": "target", "balance_warmup": 10000}'
 
+v6 (2026-11-21), the v3 B recipe; splits/exclude_train_nolib.txt = exclude_train.txt +
+the library metals (import_library.py), so only v6metallib sees them:
+    v6global    v5global with beta / 128 (the KL averages over time per dim, so one
+                vector paid 128x more per nat than the frame sequence)
+    v6kick, v6snare (+ clap), v6metal (hat + cymbal), v6metallib (+ library metals)
+    python make_v2_configs.py --data_dir ... --tag v6global --amp_out --arms B --seeds 1 \
+        --exclude splits/exclude_train_nolib.txt --trainer_json '{"beta_max": 3.90625e-05}' --arch_json '{...v5global...}'
+    python make_v2_configs.py --data_dir ... --tag v6metal --amp_out --arms B --seeds 1 \
+        --exclude splits/exclude_train_nolib.txt --data_json '{"types": ["hat", "cymbal"], "type_weights": {"cymbal": 2.0}}'
+
 v5global = v5data with one latent vector per hit instead of a frame sequence
 (GlobalRawAudioVAE, 128 dims): does decay / attack become a linear direction?
     python make_v2_configs.py --data_dir ... --tag v5global --amp_out --arms B --seeds 1 --arch_json \
@@ -62,8 +72,9 @@ ARMS = {
 def main(args):
     base = json.load(open(args.base))
     dl = base['data_loader']['args']
+    data_over = json.loads(args.data_json) if args.data_json else {}
     ds = OneShotAudioDataset(args.data_dir, sr=dl['sr'], chunk_size=dl['chunk_size'],
-                             split='train', types=dl['types'], exclude=args.exclude)
+                             split='train', types=data_over.get('types', dl['types']), exclude=args.exclude)
     spe = math.ceil(len(ds) / dl['batch_size'])
     ep = {k: max(1, round(v / spe)) for k, v in STEPS.items()}
     print(f'{len(ds)} training files, {spe} steps/epoch -> {ep}')
@@ -92,6 +103,7 @@ def main(args):
                 c['arch']['type'] = a.get('type', c['arch']['type'])
                 c['arch']['args'].update(a.get('args', {}))
             c['data_loader']['args'].update(over.get('data_loader', {}))
+            c['data_loader']['args'].update(data_over)
             path = f'config_raw_drums_{args.tag}_{arm}{seed}.json'
             json.dump(c, open(path, 'w'), indent=4)
             print('wrote', path)
@@ -109,5 +121,7 @@ if __name__ == '__main__':
     p.add_argument('--arms', nargs='+', help='subset of arms (default all)')
     p.add_argument('--trainer_json', help='JSON dict merged into config["trainer"] last')
     p.add_argument('--arch_json', help='JSON {"type": ..., "args": {...}} merged into config["arch"] last')
+    p.add_argument('--data_json', help='JSON dict merged into config["data_loader"]["args"] last, e.g. '
+                                      '{"types": ["kick"], "type_weights": {}}; the step schedule counts these types')
     p.add_argument('--exclude', default='splits/exclude_train.txt', help='from dedupe_splits.py')
     main(p.parse_args())
