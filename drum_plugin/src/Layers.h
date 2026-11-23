@@ -54,7 +54,7 @@ struct PadRecipe
 };
 
 // Rendered audio for one pad: buffers[layer * numRR + rr], mono, at sampleRate.
-// With stereo width, sides[i] = highpass (partner - hit) / 2 for buffers[i], so a voice
+// With stereo width, sides[i] = highpass (partner - hit) / 2, decorrelated from the hit, so a voice
 // plays L = mid + w * side, R = mid - w * side (L + R = 2 * mid: mono-safe).
 struct LayerSet
 {
@@ -81,8 +81,9 @@ RenderJob makePartnerJob (const RenderJob& job, const PadRecipe& r, const KitMod
 
 // Normalise the set to a 0.9 peak (keeping levels between layers), trim trailing
 // silence (-60 dB + 50 ms, 10 ms fade), resample from the kit rate to hostRate.
-// partners (optional, one per row): side = highpass 150 Hz (partner - row) / 2,
-// scaled, trimmed and resampled with its row.
+// partners (optional, one per row): side = highpass 150 Hz (partner - row) / 2 with its
+// correlation to the (high-passed) row removed frame by frame, scaled, trimmed and
+// resampled with its row.
 LayerSetPtr buildLayerSet (std::vector<std::vector<float>> rows, int numLayers, int numRR,
                            double kitRate, double hostRate,
                            std::vector<std::vector<float>> partners = {});

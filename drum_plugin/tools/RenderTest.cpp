@@ -109,8 +109,16 @@ int main (int argc, char* argv[])
         const auto& m = st->get (top, k);
         const auto& s = *st->getSide (top, k);
         const double rm = m.getRMSLevel (0, 0, m.getNumSamples()), rs = s.getRMSLevel (0, 0, s.getNumSamples());
+        double eL = 0.0, eR = 0.0;                          // width 2 (the maximum)
+        for (int i = 0; i < m.getNumSamples(); ++i)
+        {
+            const double a = m.getSample (0, i), d = 2.0 * s.getSample (0, i);
+            eL += (a + d) * (a + d);
+            eR += (a - d) * (a - d);
+        }
         std::cout << "  rr " << k << ": side " << juce::String (juce::Decibels::gainToDecibels (rs / rm), 1)
-                  << " dB vs mid, " << m.getNumSamples() << " / " << s.getNumSamples() << " samples\n";
+                  << " dB vs mid, R - L at width 2 " << juce::String (10.0 * std::log10 (eR / eL), 2) << " dB, "
+                  << m.getNumSamples() << " / " << s.getNumSamples() << " samples\n";
     }
     {
         const auto& m = st->get (top, 0);

@@ -87,6 +87,40 @@ static void highpassZeroPhase (std::vector<float>& x, double fc, double fs)
     pass (x.rbegin(), x.rend());
 }
 
+// side -= g * mid per 50%-overlap periodic-Hann frame (the windows sum to 1), g the
+// frame's least-squares gain of side on mid. (partner - hit) carries minus the hit's own
+// texture, so it anti-correlates with the hit and R = mid - side came out louder (up to
+// ~9 dB on noisy hits at width 2). With the correlated part removed, L and R have equal
+// energy in every frame, and L + R is still 2 * mid.
+static void orthogonalise (std::vector<float>& side, const std::vector<float>& mid, int n = 1024)
+{
+    const int hop = n / 2, N = (int) side.size();
+    std::vector<float> w ((size_t) n), out ((size_t) N, 0.f);
+    for (int i = 0; i < n; ++i)
+        w[(size_t) i] = 0.5f - 0.5f * std::cos (juce::MathConstants<float>::twoPi * (float) i / (float) n);
+    for (int start = -hop; start < N; start += hop)
+    {
+        double sm = 0.0, mm = 0.0;
+        for (int i = 0; i < n; ++i)
+        {
+            const int j = start + i;
+            if (j < 0 || j >= N)
+                continue;
+            const double a = side[(size_t) j] * w[(size_t) i], b = mid[(size_t) j] * w[(size_t) i];
+            sm += a * b;
+            mm += b * b;
+        }
+        const float g = mm > 1e-12 ? (float) (sm / mm) : 0.f;
+        for (int i = 0; i < n; ++i)
+        {
+            const int j = start + i;
+            if (j >= 0 && j < N)
+                out[(size_t) j] += w[(size_t) i] * (side[(size_t) j] - g * mid[(size_t) j]);
+        }
+    }
+    side.swap (out);
+}
+
 LayerSetPtr buildLayerSet (std::vector<std::vector<float>> rows, int numLayers, int numRR,
                            double kitRate, double hostRate, std::vector<std::vector<float>> partners)
 {
@@ -135,6 +169,9 @@ LayerSetPtr buildLayerSet (std::vector<std::vector<float>> rows, int numLayers, 
             for (size_t j = 0; j < r.size() && j < b.size(); ++j)
                 side[j] = 0.5f * (b[j] - r[j]);
             highpassZeroPhase (side, 150.0, kitRate);
+            auto midHp = r;
+            highpassZeroPhase (midHp, 150.0, kitRate);           // keeps the side high-passed
+            orthogonalise (side, midHp);
         }
         for (auto& x : r)
             x *= norm;

@@ -262,7 +262,7 @@ DrumMachineEditor::DrumMachineEditor (DrumMachineProcessor& p)
             selectPad (pad);
     };
 
-    setSize (1120, 700);
+    setSize (1120, 640);
     kitChanged();
     startTimerHz (30);
 }
@@ -553,7 +553,7 @@ void DrumMachineEditor::resized()
 
     // right panel: two columns of label + control rows
     padTitle.setBounds (516, 70, 400, 26);
-    const int cx1 = 500 + 14 + lw, cx2 = 812 + lw, cw = 196, rh = 30, ry = 104;
+    const int cx1 = 500 + 14 + lw, cx2 = 812 + lw, cw = 196, rh = 28, ry = 104;
     auto col = [&] (int x, std::initializer_list<juce::Component*> comps)
     {
         int y = ry;
