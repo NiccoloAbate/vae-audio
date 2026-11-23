@@ -67,21 +67,44 @@ class AmplitudeOutput(nn.Module):
     both read from the decoder's last features. 2*sigmoid(a)**2.3 + 1e-7 can reach
     (near) zero, so silence is one saturated value instead of a waveform that must
     cancel exactly; a plain conv head leaves a buzz at the frame rate there."""
-    def __init__(self, in_ch, out_ch, amp_kernel, tanh=True, noise_hop=0):
+    def __init__(self, in_ch, out_ch, amp_kernel, tanh=True, noise_hop=0, noise_offset=-5.0,
+                 noise_mix='after', gate_offset=-3.0, noise_only_p=0.0):
         super().__init__()
         self.wave = nn.Conv1d(in_ch, out_ch, 7, padding=3)
         self.amp = nn.Conv1d(in_ch, out_ch, amp_kernel, padding=amp_kernel // 2)
         self.tanh = tanh
-        self.noise = NoiseOutput(in_ch, out_ch, noise_hop) if noise_hop else None
+        self.noise = NoiseOutput(in_ch, out_ch, noise_hop, noise_offset) if noise_hop else None
+        # How the noise branch joins the waveform head:
+        #   'after': wave * envelope + noise (RAVE v1's Generator; the default)
+        #   'under': (wave + noise) * envelope (the envelope also keeps silence for the noise)
+        #   'gate':  ((1-g) * wave + g * noise) * envelope with a learned per-sample gate g,
+        #            so moving towards noise swaps content instead of adding energy
+        # Local tests (2026-11-23, metals): under the reconstruction loss alone the noise
+        # is pushed down in all three; RAVE v1 only adds it in the adversarial stage.
+        assert noise_mix in ('after', 'under', 'gate'), noise_mix
+        self.noise_mix = noise_mix
+        self.noise_only_p = noise_only_p      # 'gate', training only: share of items decoded by the noise alone
+        if self.noise is not None and noise_mix == 'gate':
+            self.gate = nn.Conv1d(in_ch, out_ch, amp_kernel, padding=amp_kernel // 2)
+            nn.init.zeros_(self.gate.weight)
+            nn.init.constant_(self.gate.bias, gate_offset)
 
     def forward(self, h):
         w = self.wave(h)
         if self.tanh:
             w = torch.tanh(w)
-        y = w * mod_sigmoid(self.amp(h))
-        if self.noise is not None:
-            y = y + self.noise(h)
-        return y
+        env = mod_sigmoid(self.amp(h))
+        if self.noise is None:
+            return w * env
+        if self.noise_mix == 'after':
+            return w * env + self.noise(h)
+        if self.noise_mix == 'gate':
+            g = torch.sigmoid(self.gate(h))
+            if self.training and self.noise_only_p > 0:
+                solo = (torch.rand(h.shape[0], 1, 1, device=h.device) < self.noise_only_p).to(g.dtype)
+                g = solo + (1 - solo) * g
+            return ((1 - g) * w + g * self.noise(h)) * env
+        return (w + self.noise(h)) * env
 
 
 def mod_sigmoid(x):
@@ -93,8 +116,9 @@ class NoiseOutput(nn.Module):
     the magnitude response (hop + 1 bins, 0..Nyquist) of a filter applied to white
     noise. Filtering is done in the STFT domain (n_fft = 2*hop, Hann, 50% overlap-add)
     rather than RAVE's per-block convolution, whose block seams would modulate the
-    noise at sr/hop. The -5 offset starts the branch near silent."""
-    def __init__(self, in_ch, out_ch, hop=128):
+    noise at sr/hop. `offset` shifts the magnitude logits: RAVE's -5 starts the
+    branch ~94 dB down; 0 starts it level with the waveform head."""
+    def __init__(self, in_ch, out_ch, hop=128, offset=-5.0):
         super().__init__()
         ratios = []
         h = hop
@@ -110,12 +134,12 @@ class NoiseOutput(nn.Module):
             if not last:
                 layers.append(nn.LeakyReLU(0.2))
         self.net = nn.Sequential(*layers)
-        self.hop, self.out_ch = hop, out_ch
+        self.hop, self.out_ch, self.offset = hop, out_ch, offset
         self.register_buffer('window', torch.hann_window(2 * hop), persistent=False)
 
     def forward(self, h):
         B, T = h.shape[0], h.shape[-1]
-        mag = mod_sigmoid(self.net(h) - 5)                         # (B, C*(hop+1), T/hop)
+        mag = mod_sigmoid(self.net(h) + self.offset)                         # (B, C*(hop+1), T/hop)
         mag = mag.reshape(B * self.out_ch, self.hop + 1, -1)
         mag = torch.cat([mag, mag[..., -1:]], -1)                  # stft(center=True) has T/hop + 1 frames
         noise = torch.rand(B * self.out_ch, T, device=h.device, dtype=h.dtype) * 2 - 1
@@ -217,7 +241,8 @@ class RawAudioVAE(nn.Module):
         Total compression: 16 × 64 = 1024x
     """
     def __init__(self, latent_dim=64, channels=(32, 64, 128, 256, 512),
-                 strides=(4, 4, 4, 4), n_bands=None, amp_out=False, noise_hop=0):
+                 strides=(4, 4, 4, 4), n_bands=None, amp_out=False, noise_hop=0,
+                 noise_offset=-5.0, noise_mix='after', gate_offset=-3.0, noise_only_p=0.0):
         super().__init__()
         channels = list(channels)
         strides  = list(strides)
@@ -258,7 +283,9 @@ class RawAudioVAE(nn.Module):
         assert amp_out or not noise_hop, 'noise_hop needs amp_out'
         if amp_out:                 # waveform x amplitude envelope (AmplitudeOutput)
             dec.append(AmplitudeOutput(dec_ch[-1], out_ch, 2 * strides[0] + 1,
-                                       tanh=n_bands is None, noise_hop=noise_hop))
+                                       tanh=n_bands is None, noise_hop=noise_hop,
+                                       noise_offset=noise_offset, noise_mix=noise_mix,
+                                       gate_offset=gate_offset, noise_only_p=noise_only_p))
         else:
             dec.append(nn.Conv1d(dec_ch[-1], out_ch, 7, padding=3))
             if n_bands is None:

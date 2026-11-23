@@ -132,3 +132,4 @@ __MACOSX/
 
 # exported plugin kits (export_kit.py)
 kits/
+forks/
