@@ -406,6 +406,9 @@ def run_audio_dir(audio_dir, rel_files, eval_sr, eval_len):
 # FAD (fadtk CLI)
 # ---------------------------------------------------------------------------
 
+FAD_WORKERS = None  # fadtk -w (its default, 8, loads 8 copies of the embedding model)
+
+
 def run_fad(fadtk, fad_model, ref_dir, sys_dir, csv_path, inf=False, sox_path=None):
     """FAD(ref_dir, sys_dir) with fadtk; returns (score, inf_r2) from its csv."""
     # fadtk caches embeddings in subfolders keyed by file name; a re-rendered
@@ -418,6 +421,8 @@ def run_fad(fadtk, fad_model, ref_dir, sys_dir, csv_path, inf=False, sox_path=No
         cmd.append('--inf')
     if sox_path:
         cmd += ['-s', sox_path]
+    if FAD_WORKERS:
+        cmd += ['-w', str(FAD_WORKERS)]
     print('$ ' + ' '.join(cmd))
     subprocess.run(cmd, check=True)
     with open(csv_path) as f:
@@ -663,7 +668,9 @@ if __name__ == '__main__':
     p.add_argument('--fad_model', default='clap-laion-audio')
     p.add_argument('--fad_inf', action='store_true', help='also extrapolate FAD-inf')
     p.add_argument('--sox_path', help='passed to fadtk -s (default /usr/bin/sox)')
+    p.add_argument('--fad_workers', type=int, help='fadtk worker processes (fadtk default 8; each loads the embedding model)')
     args = p.parse_args()
+    FAD_WORKERS = args.fad_workers
     if not args.fad_sanity and not args.name:
         p.error('--name is required')
     if (args.fad_sanity or args.fad_only or args.gen_dir) and not args.fadtk:
