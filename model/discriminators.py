@@ -18,6 +18,7 @@ import torch.nn.functional as F
 from torch.nn.utils import weight_norm
 
 from model.model import MultiScaleDiscriminator
+from model.loss import stft
 
 
 class PeriodDiscriminator(nn.Module):
@@ -72,8 +73,7 @@ class STFTDiscriminator(nn.Module):
         self.post = weight_norm(nn.Conv2d(filters, 1, (3, 3), padding=(1, 1)))
 
     def forward(self, x):                                  # (B, 1, T)
-        S = torch.stft(x.squeeze(1), self.n_fft, self.hop, self.n_fft, self.window,
-                       normalized=True, return_complex=True)          # (B, F, frames)
+        S = stft(x.squeeze(1), self.n_fft, self.hop, self.window, normalized=True)   # (B, F, frames)
         z = torch.stack([S.real, S.imag], 1).transpose(2, 3)          # (B, 2, frames, F)
         feats = []
         for conv in self.convs:

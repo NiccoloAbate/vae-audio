@@ -4,6 +4,14 @@ import torch.nn.functional as F
 from base import approx_qy_x
 
 
+def stft(x, n_fft, hop, win, **kw):
+    """torch.stft(center=True), with the reflect padding done outside: on MPS (torch
+    2.10) the centered stft has a wrong backward (gradients off by ~100%), while
+    stft(center=False) and F.pad are correct. Same values on every device."""
+    x = F.pad(x.unsqueeze(1), (n_fft // 2, n_fft // 2), mode='reflect').squeeze(1)
+    return torch.stft(x, n_fft, hop, n_fft, win, center=False, return_complex=True, **kw)
+
+
 def multi_res_stft_loss(y, y_hat,
                         fft_sizes=(2048, 1024, 512, 256),
                         hop_sizes=(512,  256,  128,  64)):
@@ -18,8 +26,8 @@ def multi_res_stft_loss(y, y_hat,
     total = torch.zeros(1, device=device)
     for n_fft, hop in zip(fft_sizes, hop_sizes):
         win = torch.hann_window(n_fft, device=device)
-        Y    = torch.stft(y,     n_fft, hop, n_fft, win, return_complex=True)
-        Yh   = torch.stft(y_hat, n_fft, hop, n_fft, win, return_complex=True)
+        Y    = stft(y,     n_fft, hop, win)
+        Yh   = stft(y_hat, n_fft, hop, win)
         Y_m  = Y.abs()
         Yh_m = Yh.abs()
         # spectral convergence

@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from scipy.signal.windows import kaiser
 from base import BaseModel, BaseVAE, BaseGMVAE
+from model.loss import stft
 
 
 # ---------------------------------------------------------------------------
@@ -621,7 +622,7 @@ class MultiScaleSpecDiscriminator(nn.Module):
         """Compute log-magnitude STFT from waveform (B, 1, T) → (B, 1, F, T_frames)."""
         x_sq = x.squeeze(1)                                         # (B, T)
         win  = torch.hann_window(n_fft, device=x.device)
-        S    = torch.stft(x_sq, n_fft, hop, n_fft, win, return_complex=True)
+        S    = stft(x_sq, n_fft, hop, win)
         mag  = torch.log(S.abs() + 1e-5)                            # (B, F, T_frames)
         return mag.unsqueeze(1)                                      # (B, 1, F, T_frames)
 
