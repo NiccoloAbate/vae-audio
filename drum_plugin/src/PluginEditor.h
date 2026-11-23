@@ -83,6 +83,7 @@ private:
 
     juce::ComboBox slotA, slotB, mode, velTarget, choke, varOrder;
     juce::Slider morph, width, decay, punch, variation, seed, rr, velDepth, velGain, gain, pan, note;
+    juce::Slider panSpread, tune, tuneSpread, stereo, stereoVar;
     std::array<juce::Slider, ldm::kMaxControls> controls;
     juce::ToggleButton selfChoke { "Self-choke" };
     juce::Slider master, decodeSeed;

@@ -50,9 +50,47 @@ RenderJob makeJob (const PadRecipe& r, const KitModel& kit, int& numLayers, int&
     return job;
 }
 
-LayerSetPtr buildLayerSet (std::vector<std::vector<float>> rows, int numLayers, int numRR,
-                           double kitRate, double hostRate)
+RenderJob makePartnerJob (const RenderJob& job, const PadRecipe& r, const KitModel& kit, int numRR)
 {
+    const int S = juce::jmax (1, kit.numSeeds());
+    RenderJob p = job;
+    p.decodeSeed = (job.decodeSeed + 1) % S;
+    numRR = juce::jmax (1, numRR);
+    for (size_t i = 0; i < p.rows.size(); ++i)
+    {
+        p.rows[i].varAmount = r.stereoVar;
+        p.rows[i].varSeed = (r.seed + (int) i % numRR + 32) % S;     // rows: layer * numRR + rr
+    }
+    return p;
+}
+
+// Zero-phase 2nd-order Butterworth high-pass (RBJ biquad, forward then backward).
+static void highpassZeroPhase (std::vector<float>& x, double fc, double fs)
+{
+    const double w = juce::MathConstants<double>::twoPi * fc / fs, cw = std::cos (w);
+    const double alpha = std::sin (w) / juce::MathConstants<double>::sqrt2;   // sin(w) / (2Q), Q = 1/sqrt2
+    const double a0 = 1.0 + alpha;
+    const double b0 = (1.0 + cw) / 2.0 / a0, b1 = -(1.0 + cw) / a0, b2 = b0;
+    const double a1 = -2.0 * cw / a0, a2 = (1.0 - alpha) / a0;
+    auto pass = [&] (auto begin, auto end)
+    {
+        double x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+        for (auto it = begin; it != end; ++it)
+        {
+            const double x0 = *it;
+            const double y0 = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+            x2 = x1; x1 = x0; y2 = y1; y1 = y0;
+            *it = (float) y0;
+        }
+    };
+    pass (x.begin(), x.end());
+    pass (x.rbegin(), x.rend());
+}
+
+LayerSetPtr buildLayerSet (std::vector<std::vector<float>> rows, int numLayers, int numRR,
+                           double kitRate, double hostRate, std::vector<std::vector<float>> partners)
+{
+    const bool stereo = partners.size() == rows.size() && ! rows.empty();
     auto set = std::make_shared<LayerSet>();
     set->numLayers = numLayers;
     set->numRR = numRR;
@@ -65,18 +103,8 @@ LayerSetPtr buildLayerSet (std::vector<std::vector<float>> rows, int numLayers, 
     const float norm = peak > 1e-9f ? 0.9f / peak : 1.f;
     const float floorAbs = peak * norm * 1e-3f;               // -60 dB below the set's peak
 
-    for (auto& r : rows)
+    auto toHost = [&] (const std::vector<float>& r, int len)
     {
-        for (auto& x : r)
-            x *= norm;
-        int last = 0;
-        for (int i = (int) r.size() - 1; i >= 0; --i)
-            if (std::abs (r[(size_t) i]) > floorAbs) { last = i; break; }
-        const int len = juce::jmin ((int) r.size(), last + (int) (0.05 * kitRate));
-        const int fade = juce::jmin (len, (int) (0.01 * kitRate));
-        for (int i = 0; i < fade; ++i)
-            r[(size_t) (len - 1 - i)] *= (float) i / (float) fade;
-
         juce::AudioBuffer<float> buf;
         if (std::abs (hostRate - kitRate) < 1e-6)
         {
@@ -93,7 +121,39 @@ LayerSetPtr buildLayerSet (std::vector<std::vector<float>> rows, int numLayers, 
             juce::LagrangeInterpolator interp;
             interp.process (ratio, in.data(), buf.getWritePointer (0), outLen);
         }
-        set->buffers.push_back (std::move (buf));
+        return buf;
+    };
+
+    for (size_t i = 0; i < rows.size(); ++i)
+    {
+        auto& r = rows[i];
+        std::vector<float> side;
+        if (stereo)
+        {
+            const auto& b = partners[i];
+            side.assign (r.size(), 0.f);
+            for (size_t j = 0; j < r.size() && j < b.size(); ++j)
+                side[j] = 0.5f * (b[j] - r[j]);
+            highpassZeroPhase (side, 150.0, kitRate);
+        }
+        for (auto& x : r)
+            x *= norm;
+        int last = 0;
+        for (int j = (int) r.size() - 1; j >= 0; --j)
+            if (std::abs (r[(size_t) j]) > floorAbs) { last = j; break; }
+        const int len = juce::jmin ((int) r.size(), last + (int) (0.05 * kitRate));
+        const int fade = juce::jmin (len, (int) (0.01 * kitRate));
+        for (int j = 0; j < fade; ++j)
+            r[(size_t) (len - 1 - j)] *= (float) j / (float) fade;
+        set->buffers.push_back (toHost (r, len));
+        if (stereo)
+        {
+            for (auto& x : side)
+                x *= norm;
+            for (int j = 0; j < fade; ++j)
+                side[(size_t) (len - 1 - j)] *= (float) j / (float) fade;
+            set->sides.push_back (toHost (side, len));
+        }
     }
     return set;
 }
@@ -103,6 +163,9 @@ LayerSetPtr renderPad (const PadRecipe& r, KitModel& kit, double hostRate)
     int L = 1, R = 1;
     auto job = makeJob (r, kit, L, R);
     auto rows = kit.render (job);
-    return buildLayerSet (std::move (rows), L, R, (double) kit.sampleRate(), hostRate);
+    std::vector<std::vector<float>> partners;
+    if (r.stereo > 0.f)
+        partners = kit.render (makePartnerJob (job, r, kit, R));
+    return buildLayerSet (std::move (rows), L, R, (double) kit.sampleRate(), hostRate, std::move (partners));
 }
 } // namespace ldm

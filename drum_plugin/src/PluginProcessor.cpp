@@ -35,7 +35,7 @@ static const juce::StringArray& renderParams()
     static const juce::StringArray p { "slot_a", "slot_b", "morph", "mode", "width",
                                        "c0", "c1", "c2", "c3", "c4", "c5",
                                        "var", "seed", "rr", "decay", "punch",
-                                       "vel_target", "vel_depth" };
+                                       "vel_target", "vel_depth", "stereo_var" };
     return p;
 }
 
@@ -48,6 +48,8 @@ DrumMachineProcessor::DrumMachineProcessor()
     for (int p = 0; p < kNumPads; ++p)
         for (auto& name : renderParams())
             apvts.addParameterListener (pid (p, name.toRawUTF8()), this);
+    for (int p = 0; p < kNumPads; ++p)
+        apvts.addParameterListener (pid (p, "stereo"), this);   // re-render only when sides are missing
     apvts.addParameterListener ("decode_seed", this);
     apvts.addParameterListener ("gate", this);
     for (int p = 0; p < kNumPads; ++p)
@@ -55,7 +57,9 @@ DrumMachineProcessor::DrumMachineProcessor()
                              apvts.getRawParameterValue (pid (p, "pan")), apvts.getRawParameterValue (pid (p, "vel_gain")),
                              apvts.getRawParameterValue (pid (p, "choke")), apvts.getRawParameterValue (pid (p, "self_choke")),
                              apvts.getRawParameterValue (pid (p, "var_order")),
-                             apvts.getRawParameterValue (pid (p, "mute")), apvts.getRawParameterValue (pid (p, "solo")) };
+                             apvts.getRawParameterValue (pid (p, "mute")), apvts.getRawParameterValue (pid (p, "solo")),
+                             apvts.getRawParameterValue (pid (p, "pan_rand")), apvts.getRawParameterValue (pid (p, "tune")),
+                             apvts.getRawParameterValue (pid (p, "tune_rand")), apvts.getRawParameterValue (pid (p, "stereo")) };
     audible.fill (true);
     masterGain = apvts.getRawParameterValue ("master");
     decodeSeed = apvts.getRawParameterValue ("decode_seed");
@@ -82,8 +86,11 @@ DrumMachineProcessor::DrumMachineProcessor()
 DrumMachineProcessor::~DrumMachineProcessor()
 {
     for (int p = 0; p < kNumPads; ++p)
+    {
         for (auto& name : renderParams())
             apvts.removeParameterListener (pid (p, name.toRawUTF8()), this);
+        apvts.removeParameterListener (pid (p, "stereo"), this);
+    }
     apvts.removeParameterListener ("decode_seed", this);
     apvts.removeParameterListener ("gate", this);
 }
@@ -134,6 +141,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrumMachineProcessor::create
         addF ("vel_gain", "Velocity to gain", 0.f, 1.f, 0.7f);
         addF ("gain", "Gain (dB)", -48.f, 12.f, 0.f);
         addF ("pan", "Pan", -1.f, 1.f, 0.f);
+        addF ("pan_rand", "Pan spread", 0.f, 1.f, 0.f);
+        addF ("tune", "Tune (st)", -24.f, 24.f, 0.f);
+        addF ("tune_rand", "Tune spread (st)", 0.f, 12.f, 0.f);
+        addF ("stereo", "Stereo width", 0.f, 2.f, 0.f);
+        addF ("stereo_var", "Width variation", 0.f, 2.f, 0.3f);
         addC ("choke", "Choke group", chokes, d.choke);
         layout.add (std::make_unique<AudioParameterBool> (ParameterID { pid (p, "self_choke"), 1 }, n + "Self-choke", false));
         layout.add (std::make_unique<AudioParameterBool> (ParameterID { pid (p, "mute"), 1 }, n + "Mute", false));
@@ -174,6 +186,8 @@ PadRecipe DrumMachineProcessor::readRecipe (int pad) const
     r.velDepth = raw (pad, "vel_depth");
     r.decodeSeed = (int) decodeSeed->load();
     r.gate = gate->load() > 0.5f;
+    r.stereo = raw (pad, "stereo");
+    r.stereoVar = raw (pad, "stereo_var");
     return r;
 }
 
@@ -187,11 +201,25 @@ PadPlay DrumMachineProcessor::readPlay (int pad) const
     pp.chokeGroup = (int) q.choke->load();
     pp.selfChoke = q.selfChoke->load() > 0.5f;
     pp.order = (int) q.varOrder->load();
+    pp.panSpread = q.panRand->load();
+    pp.tune = q.tune->load();
+    pp.tuneSpread = q.tuneRand->load();
+    pp.stereo = q.stereo->load();
     return pp;
 }
 
-void DrumMachineProcessor::parameterChanged (const juce::String& id, float)
+void DrumMachineProcessor::parameterChanged (const juce::String& id, float value)
 {
+    if (id.endsWith ("_stereo"))                    // the side gain plays live; render the partners once
+    {
+        const int pad = id.substring (1).getIntValue();
+        const auto set = worker.getSet (pad);
+        if (value > 0.f && ! (set && set->hasSides()))
+            worker.markDirty (pad);
+        return;
+    }
+    if (id.endsWith ("_stereo_var") && raw (id.substring (1).getIntValue(), "stereo") <= 0.f)
+        return;                                     // no partners rendered: nothing changes
     if (id == "decode_seed" || id == "gate")
     {
         worker.markAllDirty();

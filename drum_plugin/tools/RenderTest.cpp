@@ -90,5 +90,45 @@ int main (int argc, char* argv[])
             std::cout << "wrote " << out.getFullPathName() << "\n";
         }
     }
+
+    // Stereo width: partners rendered, side level vs mid on the loudest layer, and
+    // that layer as L = mid + side, R = mid - side (width 1) to <out>.stereo.wav
+    r.stereo = 1.f;
+    t0 = juce::Time::getMillisecondCounterHiRes();
+    auto st = ldm::renderPad (r, *kit, 48000.0);
+    std::cout << "stereo: " << st->numLayers << " layers x " << st->numRR << " rr + partners in "
+              << juce::roundToInt (juce::Time::getMillisecondCounterHiRes() - t0) << " ms\n";
+    if (! st->hasSides())
+    {
+        std::cerr << "stereo render has no side buffers\n";
+        return 1;
+    }
+    const int top = st->numLayers - 1;
+    for (int k = 0; k < st->numRR; ++k)
+    {
+        const auto& m = st->get (top, k);
+        const auto& s = *st->getSide (top, k);
+        const double rm = m.getRMSLevel (0, 0, m.getNumSamples()), rs = s.getRMSLevel (0, 0, s.getNumSamples());
+        std::cout << "  rr " << k << ": side " << juce::String (juce::Decibels::gainToDecibels (rs / rm), 1)
+                  << " dB vs mid, " << m.getNumSamples() << " / " << s.getNumSamples() << " samples\n";
+    }
+    {
+        const auto& m = st->get (top, 0);
+        const auto& s = *st->getSide (top, 0);
+        juce::AudioBuffer<float> lr (2, m.getNumSamples());
+        for (int i = 0; i < m.getNumSamples(); ++i)
+        {
+            lr.setSample (0, i, m.getSample (0, i) + s.getSample (0, i));
+            lr.setSample (1, i, m.getSample (0, i) - s.getSample (0, i));
+        }
+        juce::File out (juce::String (argv[2]) + ".stereo.wav");
+        out.deleteFile();
+        juce::WavAudioFormat wav;
+        std::unique_ptr<juce::AudioFormatWriter> w (wav.createWriterFor (
+            new juce::FileOutputStream (out), 48000.0, 2, 24, {}, 0));
+        if (w)
+            w->writeFromAudioSampleBuffer (lr, 0, lr.getNumSamples());
+        std::cout << "wrote " << out.getFullPathName() << "\n";
+    }
     return 0;
 }

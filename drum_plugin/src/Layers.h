@@ -48,27 +48,44 @@ struct PadRecipe
     float velDepth = 0.f;
     int decodeSeed = 0;
     bool gate = false;
+    // Stereo width: > 0 also renders a partner per hit (a fresh decode seed plus
+    // its own random offset of size stereoVar); the set then carries side buffers.
+    float stereo = 0.f, stereoVar = 0.3f;
 };
 
 // Rendered audio for one pad: buffers[layer * numRR + rr], mono, at sampleRate.
+// With stereo width, sides[i] = highpass (partner - hit) / 2 for buffers[i], so a voice
+// plays L = mid + w * side, R = mid - w * side (L + R = 2 * mid: mono-safe).
 struct LayerSet
 {
     int numLayers = 1, numRR = 1;
     double sampleRate = 44100.0;
-    std::vector<juce::AudioBuffer<float>> buffers;
+    std::vector<juce::AudioBuffer<float>> buffers, sides;
     const juce::AudioBuffer<float>& get (int layer, int rr) const
     {
         return buffers[(size_t) (layer * numRR + rr)];
+    }
+    bool hasSides() const { return ! sides.empty(); }
+    const juce::AudioBuffer<float>* getSide (int layer, int rr) const
+    {
+        return sides.empty() ? nullptr : &sides[(size_t) (layer * numRR + rr)];
     }
 };
 using LayerSetPtr = std::shared_ptr<const LayerSet>;
 
 RenderJob makeJob (const PadRecipe& r, const KitModel& kit, int& numLayers, int& numRR);
 
+// The stereo partners of a job's rows: same recipe, decode seed + 1, and each row's
+// variation offset replaced by one of size stereoVar from seeds 32 above the pad's.
+RenderJob makePartnerJob (const RenderJob& job, const PadRecipe& r, const KitModel& kit, int numRR);
+
 // Normalise the set to a 0.9 peak (keeping levels between layers), trim trailing
 // silence (-60 dB + 50 ms, 10 ms fade), resample from the kit rate to hostRate.
+// partners (optional, one per row): side = highpass 150 Hz (partner - row) / 2,
+// scaled, trimmed and resampled with its row.
 LayerSetPtr buildLayerSet (std::vector<std::vector<float>> rows, int numLayers, int numRR,
-                           double kitRate, double hostRate);
+                           double kitRate, double hostRate,
+                           std::vector<std::vector<float>> partners = {});
 
 LayerSetPtr renderPad (const PadRecipe& r, KitModel& kit, double hostRate);
 } // namespace ldm

@@ -89,7 +89,8 @@ private:
     std::array<std::pair<int, float>, 64> uiNotes;
 
     // Playback parameters, cached so the audio thread does no lookups
-    struct PlayParams { std::atomic<float> *note, *gain, *pan, *velGain, *choke, *selfChoke, *varOrder, *mute, *solo; };
+    struct PlayParams { std::atomic<float> *note, *gain, *pan, *velGain, *choke, *selfChoke, *varOrder, *mute, *solo,
+                                   *panRand, *tune, *tuneRand, *stereo; };
     std::array<PlayParams, ldm::kNumPads> play {};
     std::array<bool, ldm::kNumPads> audible;                // mute / solo, audio thread
 

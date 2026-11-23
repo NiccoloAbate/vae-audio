@@ -127,7 +127,7 @@ void WaveView::paint (juce::Graphics& g)
     g.setColour (dim);
     g.setFont (juce::FontOptions (11.f));
     g.drawText (juce::String (set->numLayers) + " velocity layers x " + juce::String (set->numRR) + " variations"
-                    + (set->numLayers > 1 ? "  (faint: softest)" : ""),
+                    + (set->hasSides() ? " + stereo partners" : "") + (set->numLayers > 1 ? "  (faint: softest)" : ""),
                 r.reduced (8.f, 4.f), juce::Justification::topRight);
     g.drawText ("1.5 s", r.reduced (8.f, 4.f), juce::Justification::bottomRight);
 }
@@ -197,7 +197,7 @@ DrumMachineEditor::DrumMachineEditor (DrumMachineProcessor& p)
     }
 
     for (auto* s : { &morph, &width, &decay, &punch, &variation, &seed, &rr, &velDepth, &velGain, &gain, &pan, &note,
-                     &master, &decodeSeed })
+                     &panSpread, &tune, &tuneSpread, &stereo, &stereoVar, &master, &decodeSeed })
     {
         styleSlider (*s);
         addAndMakeVisible (*s);
@@ -231,6 +231,11 @@ DrumMachineEditor::DrumMachineEditor (DrumMachineProcessor& p)
     labelFor (velGain, "Vel. -> gain");
     labelFor (gain, "Gain (dB)");
     labelFor (pan, "Pan");
+    labelFor (panSpread, "Pan spread");
+    labelFor (tune, "Tune (st)");
+    labelFor (tuneSpread, "Tune spread");
+    labelFor (stereo, "Stereo width");
+    labelFor (stereoVar, "Width var.");
     labelFor (choke, "Choke");
     labelFor (master, "Master (dB)");
     labelFor (decodeSeed, "Decode seed");
@@ -257,7 +262,7 @@ DrumMachineEditor::DrumMachineEditor (DrumMachineProcessor& p)
             selectPad (pad);
     };
 
-    setSize (1120, 640);
+    setSize (1120, 700);
     kitChanged();
     startTimerHz (30);
 }
@@ -391,6 +396,11 @@ void DrumMachineEditor::selectPad (int pad)
     sa ("gain", gain);
     sa ("pan", pan);
     sa ("note", note);
+    sa ("pan_rand", panSpread);
+    sa ("tune", tune);
+    sa ("tune_rand", tuneSpread);
+    sa ("stereo", stereo);
+    sa ("stereo_var", stereoVar);
     for (int k = 0; k < kMaxControls; ++k)
         sa (("c" + std::to_string (k)).c_str(), controls[(size_t) k]);
     comboAtt.push_back (std::make_unique<CA> (ap, pid (pad, "mode"), mode));
@@ -555,7 +565,7 @@ void DrumMachineEditor::resized()
         }
     };
     col (cx1, { &slotA, &slotB, &morph, &mode, &width, nullptr, &decay, &punch, nullptr, &variation, &seed, &rr,
-                &varOrder, nullptr, &note });
+                &varOrder, nullptr, &stereo, &stereoVar, nullptr, &note });
     col (cx2, { &controls[0], &controls[1], &controls[2], &controls[3], &controls[4], &controls[5], nullptr,
-                &velTarget, &velDepth, &velGain, nullptr, &gain, &pan, &choke, &selfChoke });
+                &velTarget, &velDepth, &velGain, nullptr, &gain, &pan, &panSpread, &tune, &tuneSpread, &choke, &selfChoke });
 }
