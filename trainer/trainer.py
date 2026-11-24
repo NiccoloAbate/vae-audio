@@ -353,7 +353,18 @@ class RawAudioVaeAdversarialTrainer(BaseTrainer):
         ft = self._finetune_ckpt
         if ft is not None:
             # weights only: the discriminator's optimizer starts fresh, like the VAE's
-            if 'disc' in ft:
+            parts = getattr(self.disc, 'parts', {})
+            if 'disc' in ft and isinstance(self.disc, HybridDiscriminator) \
+                    and not any(k.startswith('parts.') for k in ft['disc']):
+                # a plain waveform discriminator's weights: into the hybrid's msd part
+                if 'msd' in parts:
+                    parts['msd'].load_state_dict(ft['disc'])
+                    self.logger.info('Waveform discriminator weights from the fine-tune checkpoint '
+                                     'loaded into the hybrid msd part; the other parts start fresh.')
+                else:
+                    self.logger.warning('Fine-tune checkpoint has a waveform discriminator and the '
+                                        'hybrid has no msd part; it starts from random weights.')
+            elif 'disc' in ft:
                 self.disc.load_state_dict(ft['disc'])
                 self.logger.info('Discriminator weights taken from the fine-tune checkpoint.')
             else:
